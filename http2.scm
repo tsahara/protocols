@@ -153,7 +153,7 @@
 
 
 (define (usage)
-  (display "Usage: swget url\n" (current-error-port))
+  (display "Usage: http2 url\n" (current-error-port))
   (exit 1))
 
 (define (parse-url url)
@@ -161,7 +161,7 @@
       (#f host #f port path)
     (values host port path)))
 
-(define (get url)
+(define (http2-get url)
   (receive (host port path) (parse-url url)
     (call-with-client-socket
         (make-client-socket 'inet host (string->number (or port "80")))
@@ -173,6 +173,6 @@
 
 (define (main args)
   (if (= (length args) 2)
-      (get (cadr args))
+      (http2-get (cadr args))
       (usage))
   0)

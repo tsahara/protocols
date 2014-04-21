@@ -1,7 +1,18 @@
-HTTP2 勉強会
+# HTTP2 実装メモ
+
+## -11 への追随
+
+ - とりあえず、つながるようだ...?
+ - connection header -> connection preface
+ - stream prioritization
+ - "h2c" の追加
+ - PUSH_PROMISE への padding の追加
+ - ALTSVC
+
+## 未整理
 
  - draft は header compression だけ別れている
- - http://tools.ietf.org/html/draft-ietf-httpbis-http2-10
+ - http://tools.ietf.org/html/draft-ietf-httpbis-http2-11
  - http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-06
 
  - HTTP2 Overview
