@@ -1,5 +1,7 @@
+(use binary.pack)
 (use gauche.net)
 (use gauche.uvector)
+(use srfi-1)
 (use srfi-13)
 
 (define http2-magic
@@ -44,7 +46,7 @@
   (let* ((keylen (string-length key))
 	 (vallen (string-length val))
 	 (uvec (make-u8vector (+ 3 keylen vallen))))
-    (u8vector-set!  uvec 0 #x40)
+    (u8vector-set!  uvec 0 0)
     (u8vector-set!  uvec 1 keylen)
     (u8vector-copy! uvec 2 (string->u8vector key))
     (u8vector-set!  uvec (+ 2 keylen) vallen)
@@ -54,8 +56,7 @@
 (define (make-headers-frame)
   (let1 payload
       (apply append (map u8vector->list
-			 (list #u8(#x80 #x80)
-			       (make-a-header ":method" "GET")
+			 (list (make-a-header ":method" "GET")
 			       (make-a-header ":scheme" "http")
 			       (make-a-header ":authority" "106.186.112.116:80")
 			       (make-a-header ":path" "/")
@@ -66,9 +67,9 @@
 		(list->u8vector payload))))
 
 (define (make-settings-frame)
-  (make-frame *frame-type-settings* 0 0
+  (make-frame *frame-type-settings* 0 0 #u8()))
 ;;	      #u8(3 0 0 0 100  4 0 1 0 0)))
-	      #u8(0 0 0 4 0 0 0 100  0 0 0 7 0 1 0 0)))
+;;	      #u8(0 0 0 4 0 0 0 100  0 0 0 7 0 1 0 0)))
 
 (define (dump-hexa uvec)
   (for-each (lambda (byte)
@@ -83,14 +84,10 @@
 		type)
       "(undefined)"))
 
-(define (http2-flags->readable-string type flags)
-  (if (<= type 10)
-      (list-ref '("DATA" "HEADERS" "PRIORITY" "RST_STREAM" "SETTINGS"
-		  "PUSH_PROMISE" "PING" "GOAWAY" "WINDOW_UPDATE" "CONTINUATION")
-		type)
-      "(undefined)"))
+(define (http2-flags->string type flags)
+  (format #f "(~a)" flags))
 
-(define (http2)
+(define (http2 host)
   (define (send-headers-frame sock)
     (socket-send sock (make-headers-frame)))
 
@@ -111,21 +108,32 @@
     (format #t "(end)\n")
     )
 
+  (define (dump-frame-settings payload)
+    (while (>= (string-length payload) 5)
+      (let1 l (unpack "CN" :from-string #?=payload)
+	(case (car l)
+	  ((1) (format #t " SETTINGS_HEADER_TABLE_SIZE=~a\n" (cadr l)))
+	  (else (format #t " (id=~a,val=~a)\n" (car l) (cadr l)))))
+      (set! payload (string-copy payload 5))))
+
   (define (dump-frame-verbose in)
-    (let ((frame (string->u8vector (socket-recv in 9999))))
+    (let ((frame (socket-recv in 9999)))
       (format #t "dump: ")
-      (dump-hexa frame)
+      (dump-hexa (string->u8vector frame))
       (format #t "\n")
 
-      (let ((len   (+ (* (u8vector-ref frame 1) #x100)
-		      (u8vector-ref frame 0)))
-	    (type  (u8vector-ref frame 2))
-	    (flags (u8vector-ref frame 3)))
-	(format #t "  len=~a, type=~a(~a), flags=~a\n"
-		len (http2-type->string type) type flags)
-	)))
+      (let1 l (unpack "nCCN" :from-string frame)
+	(format #t "  len=~a, type=~a(~a), flags=~a, stream-id=~a\n"
+		(first l)
+		(http2-type->string (second l)) (second l)
+		(http2-flags->string (second l) (third l))
+		(fourth l))
+	(case (second l)
+	  ((4) (dump-frame-settings
+		(substring frame 8 (+ 8 (first l)))))
+	  (else (print "not verbose"))))))
 
-  (let1 sock (make-client-socket 'inet "106.186.112.116" 80)
+  (let1 sock (make-client-socket 'inet host 80)
     (socket-send sock http2-magic)
     (send-settings-frame sock)
 
@@ -134,7 +142,7 @@
     ;; len=24 type=4 id=0
     ;; 
     (print "receive settings sent by server:")
-    (dump-frame sock)
+    (dump-frame-verbose sock)
     (send-settings-frame-ack sock)
 
     ;; 00 00 04 01 00 00 00 00
@@ -143,17 +151,13 @@
 
     (send-headers-frame sock)
 
-    (print "receive reply of headers:")
-
-    #;(print (string-take (socket-recv sock 9999) 300))
-    (print (socket-recv sock 9999))
+    (print "receive reply:")
+    (while #t
+      (dump-frame-verbose sock))
 ))
 
-;; (http2)
-
-
 (define (usage)
-  (display "Usage: http2 url\n" (current-error-port))
+  (display "Usage: http2 <hostname>\n" (current-error-port))
   (exit 1))
 
 (define (parse-url url)
@@ -173,6 +177,6 @@
 
 (define (main args)
   (if (= (length args) 2)
-      (http2-get (cadr args))
+      (http2 (cadr args))
       (usage))
   0)
