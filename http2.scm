@@ -1,11 +1,81 @@
+(use binary.io)
 (use binary.pack)
+(use gauche.collection)
 (use gauche.net)
 (use gauche.uvector)
 (use srfi-1)
+(use srfi-2)
 (use srfi-13)
+(use srfi-60)
 
-(define http2-magic
-  (string->u8vector "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
+(load "./http2-hpack.scm")
+
+(define-class <http2-connection> ()
+  ((socket  :init-keyword :socket :getter http2-connection-socket)
+   (streams :init-value '())
+   (next-id :init-value 1)
+   (buffer  :init-form (make-u8vector 65536))
+   (read-pointer :init-value 0)
+   ))
+
+(define (make-http2-connection sock)
+  (make <http2-connection>
+    :socket sock))
+
+(define (http2-connection-new-stream conn)
+  (let* ((id (http2-connection-next-id conn))
+	 (stream (make <http2-stream>
+		   :connection conn
+		   :id id)))
+    (slot-set! conn 'streams
+	       (cons (cons id stream)
+		     (slot-ref conn 'streams)))
+    stream))
+
+(define (http2-connection-get-stream conn id)
+  (let1 pair (assq id (slot-ref conn 'streams))
+    (and pair (cdr pair))))
+
+(define (http2-connection-next-id conn)
+  (rlet1 id (slot-ref conn 'next-id)
+    (slot-set! conn 'next-id (+ id 2))))
+
+(define (http2-connection-recv conn)
+  (define (u8vector-split vec ptr)
+    (let ((head (make-u8vector ptr))
+	  (tail (u8vector-copy vec ptr)))
+      (u8vector-copy! head 0 vec 0 ptr)
+      (values head tail)))
+
+  (let1 n (read-block! (slot-ref conn 'buffer)
+		       (socket-input-port (slot-ref conn 'socket))
+		       (slot-ref conn 'read-pointer)
+		       -1)
+    (slot-set! conn 'read-pointer
+	       (+ (slot-ref conn 'read-pointer) n))
+    (format #t "read ~a bytes, ptr=~a\n" n (slot-ref conn 'read-pointer)))
+  
+  (while (and-let* (( (>= (slot-ref conn 'read-pointer) 8))    ;; frame header
+		    (len (bit-field (get-u16 (slot-ref conn 'buffer) 0) 0 14))
+		    ( (>= (slot-ref conn 'read-pointer) (+ 8 len)))
+		    (id  (bit-field (get-u32 (slot-ref conn 'buffer) 4) 0 31)))
+	   (receive (frame buff)
+	       (u8vector-split (slot-ref conn 'buffer) (+ 8 len))
+	     (let1 stream (http2-connection-get-stream conn id)
+	       (http2-stream-receive-frame stream frame)
+	       (slot-set! conn 'buffer buff)
+	       (slot-set! conn 'read-pointer
+			  (- (slot-ref conn 'read-pointer) (+ 8 len))))))))
+
+(define-class <http2-stream> ()
+  ((connection :init-keyword :connection)
+   (id         :init-keyword :id :getter http2-stream-id)
+   (buffer     :init-form (make-u8vector 65536))
+   (read-ptr   :init-value 0     :getter http2-stream-read-ptr)
+   ))
+
+(define (http2-stream-receive-frame stream frame)
+  (dump-frame-verbose frame))
 
 (define (set16 uvec offset num)
   (u8vector-set! uvec offset (quotient num 256))
@@ -63,19 +133,25 @@
 			       )))
     (make-frame *frame-type-headers*
 		(+ *flags-end-headers* *flags-end-stream*)
-		1 
+		1
 		(list->u8vector payload))))
 
 (define (make-settings-frame)
-  (make-frame *frame-type-settings* 0 0 #u8()))
+  (make-frame *frame-type-settings* 0 0
+	      #u8(3 0 0 0 1)))
 ;;	      #u8(3 0 0 0 100  4 0 1 0 0)))
 ;;	      #u8(0 0 0 4 0 0 0 100  0 0 0 7 0 1 0 0)))
 
 (define (dump-hexa uvec)
+  (define maxlen 200)
   (for-each (lambda (byte)
 	      (format #t "~2,'0x " byte))
-	    (u8vector->list uvec)))
-;; (dump-hexa (make-headers-frame))
+	    (u8vector->list (u8vector-copy uvec 0
+					   (min maxlen
+						(u8vector-length uvec)))))
+  (if (> (u8vector-length uvec) maxlen)
+      (format #t "...")))
+
 
 (define (http2-type->string type)
   (if (<= type 10)
@@ -85,9 +161,134 @@
       "(undefined)"))
 
 (define (http2-flags->string type flags)
-  (format #f "(~a)" flags))
 
-(define (http2 host)
+  (define (make-string-list flags dict)
+    (receive (num str-list)
+	(fold2 (lambda (mapping flags str-list)
+		 (if (logtest flags (car mapping))
+		     (values (- flags (car mapping))
+			     (cons (cdr mapping) str-list))
+		     (values flags str-list)))
+	       flags '() dict)
+      (string-join
+       (reverse (if (= num 0)
+		    str-list
+		    (append (list (format #f "0x~x" num)) str-list)))
+       ", ")))
+
+  (if (= flags 0)
+      "0"
+      (case type
+	((0) (make-string-list flags '((#x01 . "END_STREAM")
+				       (#x02 . "END_SEGMENT")
+				       (#x08 . "PAD_LOW")
+				       (#x10 . "PAD_HIGH")
+				       (#x20 . "COMPRESSED"))))
+	((1) (make-string-list flags '((#x01 . "END_STREAM")
+				       (#x02 . "END_SEGMENT")
+				       (#x04 . "END_HEADERS")
+				       (#x08 . "PAD_LOW")
+				       (#x10 . "PAD_HIGH")
+				       (#x20 . "PRIORITY"))))
+	((4) (make-string-list flags '((#x01 . "ACK"))))
+	(else (format #f "(~a)" flags)))))
+
+(define (http2-send-prism-sequence sock)
+  (socket-send sock "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
+
+(define *huffman-tree* (make-huffman-tree))
+
+(define (huffman-decode l next)
+  (let ((h   (logbit? 7 (car l)))
+	(len (bit-field (car l) 0 7)))
+    (if h
+	(let loop ((str "")
+		   (bytes (cdr l))
+		   (bytes-length len)
+		   (bits 0)
+		   (bits-length 0)
+		   (node *huffman-tree*))
+	  #;(format #t "(loop (~a ...) 0x~x ~a 0x~x ~a ~a)\n"
+		  str (car bytes) bytes-length
+		  bits bits-length #f)
+	  (if (= bits-length 0)
+	      (if (= bytes-length 0)
+		  (next str bytes)
+		  (loop str (cdr bytes) (- bytes-length 1)
+			(car bytes) 8 node))
+	      (let1 child (if (logbit? (- bits-length 1) bits)
+			      (cdr node)
+			      (car node))
+		(if (pair? child)
+		    (loop str bytes bytes-length bits
+			  (- bits-length 1) child)
+		    (loop (string-append str (string (integer->char child)))
+			  bytes bytes-length bits (- bits-length 1)
+			  *huffman-tree*)))))
+	(next (list->string (take l len))
+	      (drop l len)))))
+
+;; 
+(define (dump-frame-headers len type flags stream-id payload)
+  (define (decode-header emit table l)
+    (if (pair? l)
+	(let1 byte (car l)
+	  (cond
+	   ;; Indexed Header Field
+	   ((logbit? 7 byte) 
+	    (begin
+	      ;; first entry in static table is indexed 1
+	      (let1 pair (list-ref table (- (bit-field byte 0 7) 1))
+		(emit (car pair) (cadr pair))
+		(decode-header emit (cons pair table) (cdr l)))))
+	   
+	   ;; Literal Header Field with Incremental Indexing
+	   ((logbit? 6 byte) 
+	    (let* ((index (bit-field byte 0 6))
+		   (entry (list-ref table (- index 1))))
+	      (huffman-decode (cdr l) (lambda (str l)
+					(emit (car entry) str)
+					(decode-header emit
+						       (cons entry table)
+						       l)))))
+	   
+	   (else (errorf "notyet: 0x~x" (car l)))))))
+    
+  (decode-header (lambda (name value)
+		   (format #t "  ~a: ~a\n" name value))
+		 (list-copy *static-table*)
+		 (u8vector->list (string->u8vector payload)))
+  )
+
+(define (dump-frame-settings payload)
+  (while (>= (string-length payload) 5)
+    (let1 l (unpack "CN" :from-string payload)
+      (case (car l)
+	((1) (format #t " SETTINGS_HEADER_TABLE_SIZE=~a\n" (cadr l)))
+	(else (format #t " (id=~a,val=~a)\n" (car l) (cadr l)))))
+    (set! payload (string-copy payload 5))))
+
+(define (dump-frame-verbose frame)
+  (format #t "dump: ")
+  (dump-hexa frame)
+  (format #t "\n")
+  
+  (let ((len       (bit-field (get-u16 frame 0) 0 14))
+	(type      (get-u8 frame 2))
+	(flags     (get-u8 frame 3))
+	(stream-id (bit-field (get-u32 frame 4) 0 31)))
+    (format #t "  len=~a, type=~a(~a), flags=~a, stream-id=~a\n"
+	    len
+	    (http2-type->string type) type
+	    (http2-flags->string type flags)
+	    stream-id)
+    (case type
+      ((1) (dump-frame-headers  len type flags stream-id
+				(u8vector->string (u8vector-copy frame 8))))
+      ((4) (dump-frame-settings (u8vector->string (u8vector-copy frame 8))))
+      (else (print "  (XXX: not yet)")))))
+
+(define (http2 host port)
   (define (send-headers-frame sock)
     (socket-send sock (make-headers-frame)))
 
@@ -101,64 +302,29 @@
 			     0
 			     (make-u8vector 0))))
 
-  (define (dump-frame in)
-    (format #t "dump: ")
-    (let ((frame (string->u8vector (socket-recv in 9999))))
-      (dump-hexa frame))
-    (format #t "(end)\n")
-    )
-
-  (define (dump-frame-settings payload)
-    (while (>= (string-length payload) 5)
-      (let1 l (unpack "CN" :from-string #?=payload)
-	(case (car l)
-	  ((1) (format #t " SETTINGS_HEADER_TABLE_SIZE=~a\n" (cadr l)))
-	  (else (format #t " (id=~a,val=~a)\n" (car l) (cadr l)))))
-      (set! payload (string-copy payload 5))))
-
-  (define (dump-frame-verbose in)
-    (let ((frame (socket-recv in 9999)))
-      (format #t "dump: ")
-      (dump-hexa (string->u8vector frame))
-      (format #t "\n")
-
-      (let1 l (unpack "nCCN" :from-string frame)
-	(format #t "  len=~a, type=~a(~a), flags=~a, stream-id=~a\n"
-		(first l)
-		(http2-type->string (second l)) (second l)
-		(http2-flags->string (second l) (third l))
-		(fourth l))
-	(case (second l)
-	  ((4) (dump-frame-settings
-		(substring frame 8 (+ 8 (first l)))))
-	  (else (print "not verbose"))))))
-
-  (let1 sock (make-client-socket 'inet host 80)
-    (socket-send sock http2-magic)
+  (let* ((sock (make-client-socket 'inet host port))
+	 (conn (make-http2-connection sock)))
+    (http2-send-prism-sequence sock)
     (send-settings-frame sock)
-
-    ;; 00 18 04 00  00 00 00 00  00 00 00 04  00 00 00 64
-    ;; 00 00 00 07  00 00 ff ff  00 00 00 02  00 00 00 00
-    ;; len=24 type=4 id=0
-    ;; 
+    
+    ;; receive server settings
     (print "receive settings sent by server:")
-    (dump-frame-verbose sock)
+    ;(dump-frame-verbose sock)
     (send-settings-frame-ack sock)
-
+    
     ;; 00 00 04 01 00 00 00 00
-    (print "receive settings sent by server:")
-    (dump-frame-verbose sock)
+    (print "receive settings ack:")
+    ;(dump-frame-verbose sock)
 
-    (send-headers-frame sock)
+    (let1 stream (http2-connection-new-stream conn)
+      (send-headers-frame sock)
 
-    (print "receive reply:")
-    (while #t
-      (dump-frame-verbose sock))
-))
+      (while #t
+	(http2-connection-recv conn)))))
 
 (define (usage)
-  (display "Usage: http2 <hostname>\n" (current-error-port))
-  (exit 1))
+  (display "Usage: http2 <url>\n")
+  (exit 0))
 
 (define (parse-url url)
   (rxmatch-let (rxmatch #/^http:\/\/([-A-Za-z\d.]+)(:(\d+))?(\/.*)?/ url)
@@ -167,16 +333,11 @@
 
 (define (http2-get url)
   (receive (host port path) (parse-url url)
-    (call-with-client-socket
-        (make-client-socket 'inet host (string->number (or port "80")))
-      (lambda (in out)
-        (format out "GET ~a HTTP/1.0\r\n" path)
-        (format out "host: ~a\r\n\r\n" host)
-        (flush out)
-        (copy-port in (current-output-port))))))
+    (http2 host port)))
 
 (define (main args)
+  (default-endian 'big-endian)
   (if (= (length args) 2)
-      (http2 (cadr args))
+      (http2-get (cadr args))
       (usage))
   0)
