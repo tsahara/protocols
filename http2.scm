@@ -1,3 +1,9 @@
+;; TODO:
+;; support all frames
+;; better error handling
+;; API
+;; compressed frame
+
 (use binary.io)
 (use binary.pack)
 (use gauche.collection)
@@ -228,7 +234,6 @@
 	(next (list->string (take l len))
 	      (drop l len)))))
 
-;; 
 (define (dump-frame-headers len type flags stream-id payload)
   (define (decode-header emit table l)
     (if (pair? l)
@@ -260,6 +265,12 @@
 		 (u8vector->list (string->u8vector payload)))
   )
 
+(define (dump-priority-frame len type flags stream-id payload)
+  (format #t "  Exclusive=~a, stream-dependency=~a weight=~a\n"
+	  (if (logbit? 7 (get-u8 payload 0)) 1 0)
+	  (bit-field (get-u32 payload 0) 0 32)
+	  (get-u8 payload 4)))
+
 (define (dump-frame-settings payload)
   (while (>= (string-length payload) 5)
     (let1 l (unpack "CN" :from-string payload)
@@ -284,6 +295,8 @@
 	    stream-id)
     (case type
       ((1) (dump-frame-headers  len type flags stream-id
+				(u8vector->string (u8vector-copy frame 8))))
+      ((2) (dump-priority-frame len type flags stream-id
 				(u8vector->string (u8vector-copy frame 8))))
       ((4) (dump-frame-settings (u8vector->string (u8vector-copy frame 8))))
       (else (print "  (XXX: not yet)")))))
