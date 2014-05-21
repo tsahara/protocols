@@ -252,7 +252,29 @@
 	(next (list->string (take l len))
 	      (drop l len)))))
 
+
+
 (define (dump-frame-headers len type flags stream-id payload)
+  (define (decode-variable-length-integer l prefix-length)
+    (define (mask x) (bit-field x 0 prefix-length))
+    (if (< (mask (car l)) (mask 255))
+	(values (mask (car l)) (cdr l))
+	(let loop ((l (cdr l))
+		   (i (mask 255))
+		   (m 0))
+	  (let1 next-i (+ i (* (logand (car l) 127) (expt 2 m)))
+	    (if (logbit? 7 (car l))
+		(loop (cdr l) next-i (+ m 7))
+		(values next-i (cdr l)))))))
+
+  (define (decode-string-literal l)
+    (receive (len str-l)
+	(decode-variable-length-integer l 7)
+      (if (logbit? 7 (car l))
+	  (error "huffman...")
+	  (values (list->string (map integer->char (take (cdr l) len)))
+		  (drop (cdr l) len)))))
+    
   (define (decode-header emit table l)
     (if (pair? l)
 	(let1 byte (car l)
@@ -274,8 +296,22 @@
 					(decode-header emit
 						       (cons entry table)
 						       l)))))
-	   
-	   (else (errorf "notyet header type: 0x~x" (car l)))))))
+	   ;; Encoding Context Update
+	   ((logbit? 5 byte)
+	    (errorf "Encoding Context Update notyet"))
+
+	   ;; Literal Header Field never Indexed
+	   ((logbit? 4 byte)
+	    (errorf "notyet header type: Literal Header Field never Indexed"))
+
+	   ;; Literal Header Field without Indexing
+	   (else
+	    (receive (idx value-l)
+		(decode-variable-length-integer l 4)
+	      (receive (str next-l)
+		  (decode-string-literal value-l)
+		(emit (car (list-ref table (- idx 1))) str)
+		(decode-header emit table next-l))))))))
     
   (decode-header (lambda (name value)
 		   (format #t "  ~a: ~a\n" name value))
