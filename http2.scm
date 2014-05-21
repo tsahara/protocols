@@ -1,4 +1,7 @@
 ;; TODO:
+;; more parameters in SETTINGS frame
+;; flow control
+;; error code -> string
 ;; support all frames
 ;; better error handling
 ;; API
@@ -135,7 +138,7 @@
 			 (list (make-a-header ":method" "GET")
 			       (make-a-header ":scheme" "http")
 			       (make-a-header ":authority" "106.186.112.116:80")
-			       (make-a-header ":path" "/")
+			       (make-a-header ":path" "/README")
 			       )))
     (make-frame *frame-type-headers*
 		(+ *flags-end-headers* *flags-end-stream*)
@@ -144,9 +147,8 @@
 
 (define (make-settings-frame)
   (make-frame *frame-type-settings* 0 0
-	      #u8(3 0 0 0 1)))
-;;	      #u8(3 0 0 0 100  4 0 1 0 0)))
-;;	      #u8(0 0 0 4 0 0 0 100  0 0 0 7 0 1 0 0)))
+	      #u8(3 0 0 0 1
+		  2 0 0 0 0)))
 
 (define (dump-hexa uvec)
   (define maxlen 200)
@@ -158,6 +160,15 @@
   (if (> (u8vector-length uvec) maxlen)
       (format #t "...")))
 
+
+(define (http2-error-code->string code)
+  (if (<= code 12)
+      (vector-ref #("NO_ERROR" "PROTOCOL_ERROR" "INTERNAL_ERROR"
+		    "FLOW_CONTROL_ERROR" "SETTINGS_TIMEOUT" "STREAM_CLOSED"
+		    "FRAME_SIZE_ERROR" "REFUSED_STREAM" "CANCEL"
+		    "COMPRESSION_ERROR" "CONNECT_ERROR" "ENHANCE_YOUR_CALM"
+		    "INADEQUATE_SECURITY"))
+      (format #f "(unknown error code ~a)" code)))
 
 (define (http2-type->string type)
   (if (<= type 10)
@@ -197,6 +208,13 @@
 				       (#x10 . "PAD_HIGH")
 				       (#x20 . "PRIORITY"))))
 	((4) (make-string-list flags '((#x01 . "ACK"))))
+	((5) (make-string-list flags '((#x04 . "END_HEADERS")
+				       (#x08 . "PAD_LOW")
+				       (#x10 . "PAD_HIGH"))))
+	((6) (make-string-list flags '((#x01 . "ACK"))))
+	((7) (make-string-list flags '((#x04 . "END_HEADERS")
+				       (#x08 . "PAD_LOW")
+				       (#x10 . "PAD_HIGH"))))
 	(else (format #f "(~a)" flags)))))
 
 (define (http2-send-prism-sequence sock)
@@ -257,7 +275,7 @@
 						       (cons entry table)
 						       l)))))
 	   
-	   (else (errorf "notyet: 0x~x" (car l)))))))
+	   (else (errorf "notyet header type: 0x~x" (car l)))))))
     
   (decode-header (lambda (name value)
 		   (format #t "  ~a: ~a\n" name value))
@@ -271,13 +289,54 @@
 	  (bit-field (get-u32 payload 0) 0 32)
 	  (get-u8 payload 4)))
 
+(define (dump-rst-stream-frame len type flags stream-id payload)
+  (format #t "  error-code=~a (~a)\n"
+	  (get-u32 payload 0)
+	  (http2-error-code->string (get-u32 payload 0))))
+
+(define *settings-parameter-type-string* #("SETTINGS_HEADER_TABLE_SIZE"
+					    "SETTINGS_ENABLE_PUSH"
+					    "SETTINGS_MAX_CONCURRENT_STREAMS"
+					    "SETTINGS_INITIAL_WINDOW_SIZE"
+					    "SETTINGS_COMPRESS_DATA"))
+
 (define (dump-frame-settings payload)
   (while (>= (string-length payload) 5)
     (let1 l (unpack "CN" :from-string payload)
-      (case (car l)
-	((1) (format #t " SETTINGS_HEADER_TABLE_SIZE=~a\n" (cadr l)))
-	(else (format #t " (id=~a,val=~a)\n" (car l) (cadr l)))))
+      (if (< 0 (car l) (+ (vector-length *settings-parameter-type-string*) 2))
+	  (format #t "  ~a=~a\n"
+		  (vector-ref *settings-parameter-type-string* (- (car l) 1))
+		  (cadr l))
+	  (format #t "  (id=~a, val=~a)\n" (car l) (cadr l))))
     (set! payload (string-copy payload 5))))
+
+(define (dump-push-promise-frame len type flags stream-id payload)
+  (format #t "  r=~a promised-stream-id=~a\n"
+	  (bit-field (get-u32 payload 0) 31 32)
+	  (bit-field (get-u32 payload 0) 0 31)
+	  ;; XXX: headers
+	  ))
+
+(define (dump-ping-frame len type flags stream-id payload)
+  (format #t "  ~a\n"
+	  (string-join (map (cut format #f "~2,'0x" <>)
+			    paylaod)
+		       " ")))
+
+(define (dump-goaway-frame len type flags stream-id payload)
+  (format #t "  r=~a last-stream-id=~a error-code=~a additional-debug-data=~a\n"
+	  (bit-field (get-u32 payload 0) 31 32)
+	  (bit-field (get-u32 payload 0) 0 31)
+	  (get-u32 payload 4)
+	  (u8vector->string (u8vector-copy payload 8))))
+  
+(define (dump-window-update-frame len type flags stream-id payload)
+  (format #t "  r=~a window-size-increment=~a\n"
+	  (bit-field (get-u32 payload 0) 31 32)
+	  (bit-field (get-u32 payload 0) 0 31)))
+
+(define (dump-continuation-frame len type flags stream-id payload)
+  )
 
 (define (dump-frame-verbose frame)
   (format #t "dump: ")
@@ -298,7 +357,17 @@
 				(u8vector->string (u8vector-copy frame 8))))
       ((2) (dump-priority-frame len type flags stream-id
 				(u8vector->string (u8vector-copy frame 8))))
+      ((3) (dump-rst-stream-frame len type flags stream-id
+				  (u8vector->string (u8vector-copy frame 8))))
       ((4) (dump-frame-settings (u8vector->string (u8vector-copy frame 8))))
+      ((5) (dump-push-promise-frame len type flags stream-id
+				(u8vector->string (u8vector-copy frame 8))))
+      ((6) (dump-ping-frame len type flags stream-id
+				(u8vector->string (u8vector-copy frame 8))))
+      ((7) (dump-goaway-frame len type flags stream-id
+				(u8vector->string (u8vector-copy frame 8))))
+      ((8) (dump-window-update-frame len type flags stream-id
+				(u8vector->string (u8vector-copy frame 8))))
       (else (print "  (XXX: not yet)")))))
 
 (define (http2 host port)
@@ -325,7 +394,6 @@
     ;(dump-frame-verbose sock)
     (send-settings-frame-ack sock)
     
-    ;; 00 00 04 01 00 00 00 00
     (print "receive settings ack:")
     ;(dump-frame-verbose sock)
 
@@ -333,7 +401,8 @@
       (send-headers-frame sock)
 
       (while #t
-	(http2-connection-recv conn)))))
+	(http2-connection-recv conn)))
+    ))
 
 (define (usage)
   (display "Usage: http2 <url>\n")
