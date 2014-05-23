@@ -11,6 +11,7 @@
 (use binary.pack)
 (use gauche.collection)
 (use gauche.net)
+(use gauche.sequence)
 (use gauche.uvector)
 (use srfi-1)
 (use srfi-2)
@@ -25,11 +26,27 @@
    (next-id :init-value 1)
    (buffer  :init-form (make-u8vector 65536))
    (read-pointer :init-value 0)
+   (window-size :init-value 65535)
    ))
 
 (define (make-http2-connection sock)
   (make <http2-connection>
     :socket sock))
+
+(define (http2-connection-setup conn)
+  (let ((sock (slot-ref conn 'socket)))
+    (http2-connection-write conn "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+    (http2-connection-write conn (make-settings-frame
+				  '((SETTINGS_ENABLE_PUSH . 0)
+				    (SETTINGS_MAX_CONCURRENT_STREAMS . 1))))
+    (http2-connection-recv conn)
+    ))
+
+(define (http2-connection-loop conn)
+  (http2-connection-write conn (make-settings-frame-ack)))
+
+(define (http2-receive-frame frame)
+  (dump-frame-verbose frame))
 
 (define (http2-connection-new-stream conn)
   (let* ((id (http2-connection-next-id conn))
@@ -70,11 +87,15 @@
 		    (id  (bit-field (get-u32 (slot-ref conn 'buffer) 4) 0 31)))
 	   (receive (frame buff)
 	       (u8vector-split (slot-ref conn 'buffer) (+ 8 len))
-	     (let1 stream (http2-connection-get-stream conn id)
-	       (http2-stream-receive-frame stream frame)
-	       (slot-set! conn 'buffer buff)
-	       (slot-set! conn 'read-pointer
-			  (- (slot-ref conn 'read-pointer) (+ 8 len))))))))
+	     (http2-receive-frame frame)
+	     (slot-set! conn 'buffer buff)
+	     (slot-set! conn 'read-pointer
+			(- (slot-ref conn 'read-pointer) (+ 8 len)))))))
+
+(define (http2-connection-write http2 data)
+  ;; XXX: write buffering
+  (socket-send (slot-ref http2 'socket) data))
+
 
 (define-class <http2-stream> ()
   ((connection :init-keyword :connection)
@@ -82,9 +103,6 @@
    (buffer     :init-form (make-u8vector 65536))
    (read-ptr   :init-value 0     :getter http2-stream-read-ptr)
    ))
-
-(define (http2-stream-receive-frame stream frame)
-  (dump-frame-verbose frame))
 
 (define (set16 uvec offset num)
   (u8vector-set! uvec offset (quotient num 256))
@@ -100,12 +118,15 @@
   (u8vector-set! uvec (+ offset 3) (remainder num 256)))
 
 (define (make-frame type flags stream-id payload)
-  (let1 uvec (make-u8vector (+ 8 (u8vector-length payload)))
-    (set16 uvec 0 (u8vector-length payload))
+  (let* ((plen (if (u8vector? payload)
+		   (u8vector-length payload)
+		   0))
+	 (uvec (make-u8vector (+ 8 plen))))
+    (set16 uvec 0 plen)
     (u8vector-set! uvec 2 type)
     (u8vector-set! uvec 3 flags)
     (set32 uvec 4 stream-id)
-    (if (> (u8vector-length payload) 0)
+    (if (> plen 0)
 	(u8vector-copy! uvec 8 payload))
     uvec))
 
@@ -145,10 +166,22 @@
 		1
 		(list->u8vector payload))))
 
-(define (make-settings-frame)
-  (make-frame *frame-type-settings* 0 0
-	      #u8(3 0 0 0 1
-		  2 0 0 0 0)))
+(define (make-settings-frame params)
+  (define (settings-symbol->parameter sym)
+    (let1 str (symbol->string sym)
+      (+ 1 (find-index (cut string=? str <>)
+		       *settings-parameter-type-string*))))
+  
+  (let1 payload (make-u8vector (* 5 (length params)))
+    (for-each-with-index (lambda (i pair)
+			   (put-u8!  payload (+ (* 5 i) 0)
+				     (settings-symbol->parameter (car pair)))
+			   (put-u32! payload (+ (* 5 i) 1) (cdr pair)))
+			 params)
+    (make-frame *frame-type-settings* 0 0 payload)))
+
+(define (make-settings-frame-ack)
+  (make-frame *frame-type-settings* 1 0 #f))
 
 (define (dump-hexa uvec)
   (define maxlen 200)
@@ -217,9 +250,6 @@
 				       (#x10 . "PAD_HIGH"))))
 	(else (format #f "(~a)" flags)))))
 
-(define (http2-send-prism-sequence sock)
-  (socket-send sock "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
-
 (define *huffman-tree* (make-huffman-tree))
 
 (define (huffman-decode l next)
@@ -251,8 +281,6 @@
 			  *huffman-tree*)))))
 	(next (list->string (take l len))
 	      (drop l len)))))
-
-
 
 (define (dump-frame-headers len type flags stream-id payload)
   (define (decode-variable-length-integer l prefix-length)
@@ -331,10 +359,10 @@
 	  (http2-error-code->string (get-u32 payload 0))))
 
 (define *settings-parameter-type-string* #("SETTINGS_HEADER_TABLE_SIZE"
-					    "SETTINGS_ENABLE_PUSH"
-					    "SETTINGS_MAX_CONCURRENT_STREAMS"
-					    "SETTINGS_INITIAL_WINDOW_SIZE"
-					    "SETTINGS_COMPRESS_DATA"))
+					   "SETTINGS_ENABLE_PUSH"
+					   "SETTINGS_MAX_CONCURRENT_STREAMS"
+					   "SETTINGS_INITIAL_WINDOW_SIZE"
+					   "SETTINGS_COMPRESS_DATA"))
 
 (define (dump-frame-settings payload)
   (while (>= (string-length payload) 5)
@@ -406,7 +434,7 @@
 				(u8vector->string (u8vector-copy frame 8))))
       (else (print "  (XXX: not yet)")))))
 
-(define (http2 host port)
+(define (http2-old host port)
   (define (send-headers-frame sock)
     (socket-send sock (make-headers-frame)))
 
@@ -440,6 +468,13 @@
 	(http2-connection-recv conn)))
     ))
 
+(define (http2-get url)
+  (receive (host port path)
+      (parse-url url)
+    (let1 http2 (make-http2-connection (make-client-socket 'inet host port))
+      (http2-connection-setup http2)
+      )))
+
 (define (usage)
   (display "Usage: http2 <url>\n")
   (exit 0))
@@ -449,9 +484,9 @@
       (#f host #f port path)
     (values host port path)))
 
-(define (http2-get url)
+(define (http2-get-old url)
   (receive (host port path) (parse-url url)
-    (http2 host port)))
+    (http2-old host port)))
 
 (define (main args)
   (default-endian 'big-endian)
