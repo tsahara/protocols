@@ -1,23 +1,15 @@
-# HTTP2 実装メモ
+## TODO
+ - 単一コネクションで複数streamを動かした時に date: 24906 とヘッダのパーズに
+   失敗するのを直す
+ - (sys-sleep 1) を有効にするとまた違うエラーが出る
 
 ## -11 への追随
-
- - とりあえず、つながるようだ...?
- - connection header -> connection preface
  - stream prioritization
  - "h2c" の追加
  - PUSH_PROMISE への padding の追加
  - ALTSVC
 
 ## 未整理
-
- - draft は header compression だけ別れている
- - http://tools.ietf.org/html/draft-ietf-httpbis-http2-11
- - http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-06
-
- - HTTP2 Overview
-   - TCP レイヤは Connection として抽象化 (TCP/TLS)
-
  - Connection
    - Connection の中に stream がある
    - 複数の stream を持つ
