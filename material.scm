@@ -3,6 +3,7 @@
 (use gauche.net)
 (use gauche.uvector)
 (use srfi-1)
+(use srfi-19)
 
 (define (ipv6-address->string bytes offset)
   (inet-address->string (u8vector-copy bytes offset (+ offset 16)) AF_INET6))
@@ -49,11 +50,11 @@
 	(format #t "~a bytes missing from udp packet (length field is ~a but we have only ~a bytes\n"
 		len (u8vector-length bytes)))
       (case (get-u16 bytes 2)
-	((547) (show-dhcp6-packet payload))
+	((546 547) (show-dhcp6-packet payload))
 	))))
 
 (define (u8vector->hexa uv start)
-  (string-join (map (cut number->string <> 16)
+  (string-join (map (cut format #f "~2,'0x" <>)
 		    (u8vector-copy uv start))
 	       " "))
 
@@ -90,19 +91,54 @@
 	  (cdr p)
 	  (format #f "(unknown-dhcp6-option-~d)" code))))
 
+  (define (dhcp6-duid->list uv)
+    (define (lladdr offset)
+      (u8vector->hexa (u8vector-copy uv offset (+ 6 offset)) 0))
+
+    (define (dhcp6-time->string sec)
+      (date->string
+       (time-utc->date
+	(add-duration (date->time-utc (make-date 0 0 0 0 1 1 2000 0))
+		      (make-time 'time-duration 0 sec))
+	0)
+       "~4"))
+
+    (case (get-u16 uv 0)
+      ((1) `(duid-llt (hardware-type . ,(get-u16 uv 2))
+		      (time . ,(dhcp6-time->string (get-u32 uv 4)))
+		      (link-layer-address . ,(lladdr 8))))
+      ((3) `(duid-ll  (hardware-type . ,(get-u16 uv 2))
+		      (link-layer-address . ,(lladdr 4))))
+      (else (u8vector->hexa uv 0))))
+
   (define (dhcp6-parse-a-option bytes)
     (let ((code (get-u16 bytes 0))
 	  (len  (get-u16 bytes 2)))
       (values len
 	      (case code
 		((1)  `(option-clientid
-			(duid ,(u8vector->hexa bytes 2))))
+			(duid ,(dhcp6-duid->list
+				(u8vector-copy bytes 4 (+ 4 len))))))
+
+		((2)  `(option-serverid
+			(duid ,(dhcp6-duid->list
+				(u8vector-copy bytes 4 (+ 4 len))))))
+
 		((6)  `(option-oro
 			,(map (lambda (i)
 				(dhcp6-option-code->symbol (get-u16 bytes i)))
 			      (iota len 4 2))))
 		((8)  `(option-elapsed-time
 			,(/ (get-u16 bytes 4) 100)))
+
+		((23) `(option-dns-servers
+			,(map (lambda (i)
+				(cons 'dns-recursive-name-server
+				      (inet-address->string
+				       (u8vector-copy bytes (+ 4 i) (+ i 20))
+				       AF_INET6)))
+			      (iota (/ len 16) 0 16))))
+
 		((25) `(option-ia-pd
 			(iaid ,(get-u32 bytes 4))
 			(t1 ,(get-u32 bytes 8))
@@ -137,7 +173,7 @@
 
 (define (read-hex-dump)
   (define (line->hexlist line)
-    (rxmatch-let (#/^\s+0x[0-9]+: ((?: [0-9a-f]{4})+)\s*$/ line)
+    (rxmatch-let (#/^\s*0x[0-9]+: ((?: [0-9a-f]{4})+)\s*$/ line)
 	(_ hexa)
       (concatenate
        (map (lambda (s)
