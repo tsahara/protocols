@@ -37,6 +37,9 @@
   (let1 joined (apply append objects)
     (cons* (logior #x20 16) (length joined) joined)))
 
+(define (asn1-encode-implicit-sequence . objects)
+  (cons #xa0 (cdr (apply asn1-encode-sequence objects))))
+
 (define (main args)
   (let ((sock (make-socket AF_INET SOCK_DGRAM)))
     (socket-connect sock (make <sockaddr-in> :host "127.0.0.1" :port 1616))
@@ -44,14 +47,14 @@
 	(asn1-encode-sequence
 	 (asn1-encode-integer 0)
 	 (asn1-encode-octet-string "public")
-	 (list #xa0 #x1c)
-	 (asn1-encode-integer 1234567890)  ;; request-id
-	 (asn1-encode-integer 0)  ;; error-status
-	 (asn1-encode-integer 0)  ;; error-index
-	 (asn1-encode-sequence
+	 (asn1-encode-implicit-sequence
+	  (asn1-encode-integer 1234567890)  ;; request-id
+	  (asn1-encode-integer 0)  ;; error-status
+	  (asn1-encode-integer 0)  ;; error-index
 	  (asn1-encode-sequence
-	   (asn1-encode-oid 1 3 6 1 2 1 1 1 0)
-	   (asn1-encode-null))))
+	   (asn1-encode-sequence
+	    (asn1-encode-oid 1 3 6 1 2 1 1 1 0)
+	    (asn1-encode-null)))))
       (socket-send sock (list->u8vector pkt)))
     ))
 ;; (main 1)
