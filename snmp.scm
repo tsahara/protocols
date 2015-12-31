@@ -26,12 +26,19 @@
   (list 5 0))
 
 (define (asn1-encode-oid . numbers)
+  (define (encode-one-id id result)
+    (receive (q r)
+	(div-and-mod id 128)
+      (let1 l2 (cons (+ r (if (null? result) 0 #x80)) result)
+	(if (= q 0)
+	    l2
+	    (encode-one-id q l2)))))
   (unless (< (car numbers) 3)
     (error "first octet of OID must be 0, 1 or 2"))
   (cons* 6
 	 (- (length numbers) 1)
 	 (+ (* (first numbers) 40) (second numbers))
-	 (cddr numbers)))
+	 (apply append (map (cut encode-one-id <> '()) (cddr numbers)))))
 
 (define (asn1-encode-sequence . objects)
   (let1 joined (apply append objects)
