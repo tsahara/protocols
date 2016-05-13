@@ -12,6 +12,8 @@
 (use srfi-1)
 (use srfi-19)
 
+(load "./arcfour.scm")
+
 ;; Utility
 (define (get-u24 uv pos)
   (+ (* (get-u8 uv pos) 256 256)
@@ -80,8 +82,10 @@
 (define *content-type-application-data*   23)
 
 (define *ciphersuite-list*
-  '((#x00 #x01 "TLS_RSA_WITH_NULL_MD5")
-    (#x00 #x05 "TLS_RSA_WITH_RC4_128_SHA")))
+  '(("TLS_RSA_WITH_NULL_MD5"    #x00 #x01)
+    ("TLS_RSA_WITH_RC4_128_MD5" #x00 #x04)
+    ("TLS_RSA_WITH_RC4_128_SHA" #x00 #x05)
+    ))
 
 (define (insecure-random-sequence byte-count)
   (iota byte-count))
@@ -108,6 +112,13 @@
   (let1 tls (make <tls-session>)
     (slot-set! tls 'socket socket)
     tls))
+
+(define (tls-ciphersuite->string suite)
+  (let1 entry (rassoc suite *ciphersuite-list*)
+    (if entry
+	(car entry)
+	(format #f "(unknown ciphersuite { 0x~2,'0x 0x~2,'0x })"
+		(first suite) (second suite)))))
 
 ;; make keys from premaster secret
 (define (tls-calculate-keys tls)
@@ -153,11 +164,11 @@
 			       (u8vector->list
 				(slot-ref tls 'client-hello-random))
 			       (list 0)            ; SessionID length
-			       (list 0 4 0 0 0 1)  ; cipher_suites
-					           ; TLS_RSA_WITH_NULL_MD5
-			       (list 1 0)          ; compression_methods 0
+			       (list 0 4           ; cipher_suites
+				     0 4           ; TLS_RSA_WITH_RC4_128__MD5
+				     0 1)          ; TLS_RSA_WITH_NULL_MD5
+			       (list 1 0)      ; compression_methods 0
 			       ))))
-
 
 (define (p-hash hash hashlen secret seed len)
   (let loop ((output (make-u8vector len))
@@ -250,7 +261,7 @@
   (let1 encrypted (rsa-encrypt (slot-ref tls 'premaster-secret)
 			       e n)
     (make-tls-handshake tls
-			16
+			16    ; = client_key_exchange
 			(append (u16->list (u8vector-length encrypted))
 				(u8vector->list encrypted)))))
 
@@ -287,7 +298,7 @@
 
 (define (send-finished sock tls)
   (let ((d (list->u8vector (tls-finished tls))))
-    (print "client finished")
+    (print "send client finished")
     (hexdump d)
     (socket-send sock d)))
 
@@ -335,9 +346,7 @@
     (read-uvector <u8vector> len port)))
 
 (define (tls-read-ciphersuite port)
-  (let* ((a (read-u8 port))
-	 (b (read-u8 port)))
-    (cons a b)))
+  (list (read-u8 port) (read-u8 port)))
 
 (define (read-record port tls)
   (let ((type           (read-u8 port))
@@ -360,7 +369,9 @@
       ((21) ;; Alert
        (let* ((level (read-u8 port))
 	      (desc  (read-u8 port)))
-	 (format #t "TLS Alert: level=~a desc=~a\n" level desc)))
+	 (format #t "TLS Alert: level=~a desc=~a\n"
+		 (tls-alert-level->string level)
+		 (tls-alert-description->string desc))))
 
       ((22) ;; Handshake
        (begin
@@ -380,15 +391,16 @@
 	     ((2) (begin
 		    (let* ((server-version (tls-read-protocol-version port))
 			   (server-random  (read-uvector <u8vector> 32 port))
-			   (session-id         (tls-read-session-id port))
-			   (ciphersuite        (tls-read-ciphersuite port))
+			   (session-id     (tls-read-session-id port))
+			   (ciphersuite    (tls-read-ciphersuite port))
 			   (compression-method (read-u8 port))
 			   )
 		      (slot-set! tls 'server-hello-random server-random)
-		      (format #t "TLS Server Hello version=~a session-id=(~a) cipher=0x~x,0x~x\n"
+		      (format #t "TLS Server Hello version=~a session-id=(~a) cipher=~a\n"
 			      (tls-protocol-version->string server-version)
 			      (u8vector-length session-id)
-			      (car ciphersuite) (cdr ciphersuite)))))
+			      (tls-ciphersuite->string ciphersuite)))))
+
 	     ;; Certificate
 	     ((11) (begin
 		     (let ((cert-list-length (read-u24 port)))
@@ -413,166 +425,23 @@
 
       (else (errorf "unknown Record Type=~a" type)))))
 
-(define (decode-x509-der uvec)
-
-  ;; u8vector -> (values byte-length (tag class flag value))
-  (define (decode-asn1 uvec offset)
-    (receive (tag-len class flag tag)
-	(decode-tag uvec offset)
-      (receive (len-len value-len)
-	  (decode-length uvec (+ offset tag-len))
-	(values
-	 (+ tag-len len-len value-len)
-	 (decode-value uvec (+ offset tag-len len-len) value-len tag class)))))
-
-  (define (decode-tag uvec offset)
-    (let1 byte (u8vector-ref uvec offset)
-      (let ((class (bit-field byte 6 8))
-	    (flag  (bit-field byte 5 6))
-	    (num   (bit-field byte 0 5)))
-	(if (= num 3) (format #t "bit-string: flag=~a\n" flag))
-	(case class
-	  ((0) ;; Universal
-	   (values 1 class flag
-		   (case num
-		     ;; tag numbers
-		     ((1)  'boolean)
-		     ((2)  'integer)
-		     ((3)  'bit-string)
-		     ((4)  'octet-string)
-		     ((5)  'null)
-		     ((6)  'oid)
-		     ((16) 'sequence)
-		     ((17) 'set)
-		     ((19) 'printable-string)
-		     ((23) 'utc-time)
-		     (else => (cut errorf "ASN.1: tag number is ~a" <>))
-		     )))
-	  ((1) ;; Application
-	   (error "ASN.1: class is application(!?)"))
-	  ((2) ;; Context-specific
-	   (values 1 class flag num))
-	  ((3) ;; Private
-	   (error "ASN.1: class is private(!?)"))))))
-
-  (define (decode-length uvec offset)
-    (let1 len0 (u8vector-ref uvec offset)
-      (if (< len0 128)
-	  ;; short form
-	  (values 1 len0)
-	  ;; long form
-	  (let1 len-of-len (bit-field len0 0 7)
-	    (values (+ 1 len-of-len)
-		    (read-uint len-of-len
-			       (open-input-uvector
-				(u8vector-copy uvec
-					       (+ offset 1)
-					       (+ offset 1 len-of-len)))
-			       'big-endian
-			       ))))))
-
-  (define (decode-value uvec offset len tag class)
-    (if (= class 2)
-	(receive (v n)
-	    (decode-asn1 uvec offset)
-	  (values (list tag `((tag . ,tag)) v) len))
-	(case tag
-	  ;; Integer
-	  ((integer)
-	   (format #t "uvec=(~a) offset=~a len=~a\n"
-		   (u8vector-length uvec) offset len)
-	   (list tag class
-		 (read-sint len
-			    (open-input-string
-			     (u8vector->string
-			      (u8vector-copy uvec offset (+ offset len)))))))
-
-	  ;; BIT STRING
-	  ((bit-string)
-	   (list tag class (decode-bit-string
-			    (u8vector-copy uvec offset (+ offset len)))))
-
-	  ;; OCTET STRING => #u8(3 1 4)
-	  ((octet-string)
-	   (list tag class (u8vector-copy uvec offset (+ offset len))))
-
-	  ;; NULL => '()
-	  ((null)
-	   (list tag class '()))
-
-	  ;; OBJECT IDENTIFIER => (list 1 2 840 113549)
-	  ((oid)
-	   (list tag class
-		 (decode-oid (u8vector-copy uvec offset (+ offset len)))))
-
-	  ;; SET => (list a b c)
-	  ((sequence set)
-	   (let loop ((offs offset)
-		      (rl   (list)))
-	     (if (< offs (+ offset len))
-		 (begin
-		   ;;(format #t "seq[~a]: rl=~a\n" (length rl) rl)
-		   (receive (n val)
-		       (decode-asn1 uvec offs)
-		     (loop (+ offs n)
-			   (cons val rl))))
-		 (values (reverse rl) (- offs offset)))))
-
-	  ;; Printable String
-	  ((printable-string)
-	   (list tag (u8vector->string uvec offset (+ offset len))))
-
-	  ;; UTCTime => <date>
-	  ((utc-time)
-	   (decode-utc-time (u8vector-copy uvec offset (+ offset len))))
-
-	  (else => (cut errorf "unsupported tag: ~a" <>)))))
-
-  (receive (len asn1-object)
-      (decode-asn1 uvec 0)
-    asn1-object))
-
-(define (decode-oid uvec)
-  (receive (1st 2nd)
-      (quotient&remainder (u8vector-ref uvec 0) 40)
-    (let loop ((rl   (list 2nd 1st))
-	       (offs 1)
-	       (num  0))
-      (if (< offs (u8vector-length uvec))
-	  (let1 val (u8vector-ref uvec offs)
-	    (if (< val 128)
-		(loop (cons (+ num val) rl)
-		      (+ offs 1)
-		      0)
-		(loop rl
-		      (+ offs 1)
-		      (* 128 (+ num (- val 128))))))
-	  (reverse rl)))))
-
-(define (decode-utc-time uvec)
-  (rxmatch-let (#/^(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)?(Z|[-+]\d\d\d\d)$/
-		   (u8vector->string uvec))
-      (#f year month day hour minute second timezone)
-    (make-date 0
-	       (string->number second)
-	       (string->number minute)
-	       (string->number hour)
-	       (string->number day)
-	       (string->number month)
-	       (let1 y (string->number year)
-		 (+ y (if (< y 50) 2000 1900)))
-	       0)))
-
-(define (decode-bit-string uvec)
-  (let1 unused (u8vector-ref uvec 0)
-    ;; XXX
-    (u8vector-copy uvec 1 (u8vector-length uvec))))
-
 (define (tls-protocol-version->string ver)
   (cond ((equal? ver '(3 . 1)) "TLS1.0")
 	((equal? ver '(3 . 2)) "TLS1.1")
 	((equal? ver '(3 . 3)) "TLS1.2")
 	(else (format #f "unknown_version_~d_~d" (car ver) (cdr ver)))))
+
+(define (tls-alert-level->string level)
+  (case level
+    ((1) "warning")
+    ((2) "fatal")
+    (else (format #f "undefined alert level (~a)" level))))
+
+(define (tls-alert-description->string desc)
+  (case desc
+    ((20) "bad record mac")
+    ((40) "handshake failure")
+    (else (format #f "unknown alert description (~a)" desc))))
 
 (define (tls-record-type->string type)
   (case type
