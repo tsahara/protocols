@@ -13,6 +13,7 @@
 (use srfi-19)
 
 (load "./arcfour.scm")
+(load "./asn1.scm")
 
 ;; Utility
 (define (get-u24 uv pos)
@@ -94,18 +95,20 @@
 
 
 (define-class <tls-session> ()
-  ((socket                :init-value #f)
-   (read-sequence-number  :init-value 0)
-   (client-sequence-number :init-value 0)
-   (do-encrypt            :init-value #f)
-   (premaster-secret      :init-value #f)
-   (master-secret         :init-value #f)
-   (client-hello-random   :init-value #f)
-   (server-hello-random   :init-value #f)
+  ((socket                  :init-value #f)
+   (read-sequence-number    :init-value 0)
+   (client-sequence-number  :init-value 0)
+   (do-encrypt              :init-value #f)
+   (premaster-secret        :init-value #f)
+   (master-secret           :init-value #f)
+   (client-hello-random     :init-value #f)
+   (server-hello-random     :init-value #f)
    (client-write-mac-secret :init-value #f)
    (server-write-mac-secret :init-value #f)
-   (handshake-md5         :init-form (make <md5>))
-   (handshake-sha1        :init-form (make <sha1>))
+   (handshake-md5           :init-form (make <md5>))
+   (handshake-sha1          :init-form (make <sha1>))
+   (client-to-server-arcfour)
+   (server-to-client-arcfour)
    ))
 
 (define (make-tls socket)
@@ -231,10 +234,11 @@
 			  :hasher <md5>))))
 
   (let ((mac (make-mac)))
+    ;; GenericStreamCipher
     (append (list type 3 1)
 	    (u16->list (+ (length payload) (length mac)))
 	    payload
-	    mac)))  ;; GenericStreamCipher
+	    mac)))
 
 (define (make-tls-record tls type body)
   ((if (slot-ref tls 'do-encrypt)
@@ -268,10 +272,10 @@
 (define (tls-finished tls)
   (let ((md5-digest  (digest-final! (slot-ref tls 'handshake-md5)))
 	(sha1-digest (digest-final! (slot-ref tls 'handshake-sha1))))
-    (print "md5")
+    (print "md5 in tls-finished")
     (hexdump (string->u8vector md5-digest))
 
-    (print "sha1")
+    (print "sha1 in tls-finished")
     (hexdump (string->u8vector sha1-digest))
 
     (make-tls-handshake tls 20
@@ -420,15 +424,22 @@
 	     ))))
 
       ((23) ;; Application Data
-       (print (u8vector->string
-	       (read-uvector <u8vector> len port))))
+       (begin
+	 (print "<Application Data>")
+	 (print (u8vector->string
+		 (read-uvector <u8vector> len port)))
+	 (print "</Application Data>")))
 
-      (else (errorf "unknown Record Type=~a" type)))))
+      (else
+       (if (eof-object? type)
+	   #f
+	   (errorf "unknown Record Type=~a" type))))))
 
 (define (tls-protocol-version->string ver)
+  ;; ver: (major . minor)
   (cond ((equal? ver '(3 . 1)) "TLS1.0")
 	((equal? ver '(3 . 2)) "TLS1.1")
-	((equal? ver '(3 . 3)) "TLS1.2")
+	((equal? ver '(3 . 3)) "TLS1.2+")
 	(else (format #f "unknown_version_~d_~d" (car ver) (cdr ver)))))
 
 (define (tls-alert-level->string level)
@@ -485,15 +496,18 @@
 	(read-record (socket-input-port sock) tls)
       (read-record (socket-input-port sock) tls)
       (send-tls-key-exchange sock tls e n)
+
       (send-change-cipher-spec sock tls)
+      (print "=> send change cipher spec")
+
       (tls-calculate-keys tls)
       (send-finished sock tls)
+      (print "=> send finished")
+
       (read-record (socket-input-port sock) tls) ;; ChangeCipherSpec
 
       (tls-send-application-data tls (string->u8vector "GET / HTTP/1.0\r\n\r\n"))
 
-      (while #t
-	(read-record (socket-input-port sock) tls))
-
+      (while (read-record (socket-input-port sock) tls))
       (socket-close sock)
       )))
