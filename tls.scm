@@ -94,6 +94,33 @@
 (define *client-random* #f)
 
 
+(define-class <tls-cipher> () ())
+
+(define-class <tls-cipher-null> (<tls-cipher>) ())
+
+(define (make-tls-cipher-null)
+  (make <tls-cipher-null>))
+
+
+(define-class <tls-cipher-arcfour> (<tls-cipher>)
+  (arcfour))
+
+;; key: u8vector
+(define (make-tls-cipher-arcfour key)
+  (let1 tls-arcfour (make <tls-cipher-arcfour>)
+    (slot-set! tls-arcfour 'arcfour (make-arcfour key))
+    tls-arcfour))
+
+;; => u8vector
+(define-method tls-cipher-encrypt ((tls-cipher-arcfour <tls-cipher-arcfour>)
+				   text)
+  (arcfour-encrypt (slot-ref tls-cipher-arcfour 'arcfour) text))
+
+;; => u8vector
+(define-method tls-cipher-decrypt ((tls-cipher-arcfour <tls-cipher-arcfour>)
+				   text)
+  (arcfour-encrypt (slot-ref tls-cipher-arcfour 'arcfour) text))
+
 (define-class <tls-session> ()
   ((socket                  :init-value #f)
    (read-sequence-number    :init-value 0)
@@ -105,10 +132,14 @@
    (server-hello-random     :init-value #f)
    (client-write-mac-secret :init-value #f)
    (server-write-mac-secret :init-value #f)
+   (client-write-key)
+   (server-write-key)
+   (client-write-iv)
+   (server-write-iv)
    (handshake-md5           :init-form (make <md5>))
    (handshake-sha1          :init-form (make <sha1>))
-   (client-to-server-arcfour)
-   (server-to-client-arcfour)
+   (client-write-cipher     :init-value #f) ;; <tls-cipher>
+   (server-write-cipher     :init-value #f) ;; <tls-cipher>
    ))
 
 (define (make-tls socket)
@@ -135,12 +166,17 @@
 		      "key expansion"
 		      (u8vector-join (slot-ref tls 'server-hello-random)
 				     (slot-ref tls 'client-hello-random))
-		      (+ 16 16 0 0 0 0))
+		      ;; XXX depends on mac/enc algorithms
+		      (+ 16 16 16 16 0 0)
+		      )
     (slot-set! tls 'client-write-mac-secret (u8vector-copy keys  0 16))
     (slot-set! tls 'server-write-mac-secret (u8vector-copy keys 16 32))
-    ;; XXX
+    (slot-set! tls 'client-write-key (u8vector-copy keys 32 48))
+    (slot-set! tls 'server-write-key (u8vector-copy keys 48 64))
+    ;; XXX iv
 
-    (slot-set! tls 'do-encrypt #t)
+    (print "client-write-mac-secret:")
+    (hexdump (slot-ref tls 'client-write-mac-secret))
     ))
 
 (define (tls-client-sequence-number tls)
@@ -160,6 +196,13 @@
 	      (append (list 3 1) (insecure-random-sequence 46)))))
 
 (define (tls-client-hello tls)
+  (define (make-ciphersuite . str-list)
+    (let1 pair-list (append-map (lambda (str)
+				  (cdr (assoc str *ciphersuite-list*)))
+				str-list)
+      (append (u16->list (length pair-list))
+	      pair-list)))
+
   (tls-make-client-random tls)
   (list->u8vector
    (make-tls-handshake tls 1
@@ -167,9 +210,8 @@
 			       (u8vector->list
 				(slot-ref tls 'client-hello-random))
 			       (list 0)            ; SessionID length
-			       (list 0 4           ; cipher_suites
-				     0 4           ; TLS_RSA_WITH_RC4_128__MD5
-				     0 1)          ; TLS_RSA_WITH_NULL_MD5
+			       (make-ciphersuite "TLS_RSA_WITH_RC4_128_MD5"
+						 "TLS_RSA_WITH_NULL_MD5")
 			       (list 1 0)      ; compression_methods 0
 			       ))))
 
@@ -185,7 +227,7 @@
 	  (loop output a (+ index 1)))
 	(u8vector-copy output 0 len))))
 
-(define (tls-prf secret label seed len) ; => uvec
+(define (tls-prf secret label seed len) ; => u8vector
   (let ((md5-secret  (u8vector->string
 		      (u8vector-copy secret 0
 				     (ceiling (/ (u8vector-length secret) 2)))))
@@ -215,30 +257,35 @@
 	     256))
 	  (iota k)))))
 
+;; paylad: list of number
 (define (make-tls-plaintext tls type payload)
   (append (list type 3 1)
 	  (u16->list (length payload))
 	  payload))
 
 (define (make-tls-ciphertext tls type payload)
-  (define (make-mac)
+  (define (encrypt tls text)
+    (let ((cipher (slot-ref tls 'client-write-cipher)))
+      (u8vector->list
+       (tls-cipher-encrypt cipher (list->u8vector text)))))
+
+  (define (make-mac text)
     (u8vector->list
      (string->u8vector
       (hmac-digest-string (u8vector->string
 			   (apply u8vector
 				  (append (u64->list
 					   (tls-client-sequence-number tls))
-					  (make-tls-plaintext tls type payload))))
+					  (make-tls-plaintext tls type text))))
 			  :key (u8vector->string
 				(slot-ref tls 'client-write-mac-secret))
 			  :hasher <md5>))))
 
-  (let ((mac (make-mac)))
+  (let ((mac (make-mac payload)))
     ;; GenericStreamCipher
     (append (list type 3 1)
 	    (u16->list (+ (length payload) (length mac)))
-	    payload
-	    mac)))
+	    (encrypt tls (append payload mac)))))
 
 (define (make-tls-record tls type body)
   ((if (slot-ref tls 'do-encrypt)
@@ -357,18 +404,27 @@
 	(protocol-major (read-u8 port))
 	(protocol-minor (read-u8 port))
 	(len            (read-u16 port)))
-    (format #t "TLS record: type=~a version=~a.~a length=~a\n"
+    (format #t "TLS record received: type=~a version=~a.~a length=~a\n"
 	    (tls-record-type->string type)
 	    protocol-major
 	    protocol-minor
 	    len
 	    )
+
+    (if (and (not (eof-object? type))
+	     (slot-ref tls 'server-write-cipher))
+	(let ((uvec (read-uvector <u8vector> len port)))
+	  (set! port (open-input-uvector
+		      (tls-cipher-decrypt (slot-ref tls 'server-write-cipher)
+					  uvec)))))
+
     (case type
       ((20) ;; Change Cipher Spec
        (let ((type (read-u8 port)))
 	 (if (not (= type 1))
-	     (errorf "TLS Error: ChangeCipherSpec received but type is ~a (!= 1)" type))
-	 ))
+	     (errorf "TLS Error: ChangeCipherSpec received but type is ~a (!= 1)" type)))
+       (tls-start-decryption tls)
+       )
 
       ((21) ;; Alert
        (let* ((level (read-u8 port))
@@ -486,6 +542,16 @@
 	))
     )
 
+(define (tls-enable-cipher tls)
+  (slot-set! tls 'do-encrypt #t)
+  (slot-set! tls 'client-write-cipher
+	     (make-tls-cipher-arcfour (slot-ref tls 'client-write-key)))
+  )
+
+(define (tls-start-decryption tls)
+  (slot-set! tls 'server-write-cipher
+	     (make-tls-cipher-arcfour (slot-ref tls 'server-write-key))))
+
 (define (main args)
   (default-endian 'big-endian)
   (let* ((sock (make-client-socket 'inet "localhost" 4433))
@@ -499,8 +565,9 @@
 
       (send-change-cipher-spec sock tls)
       (print "=> send change cipher spec")
-
       (tls-calculate-keys tls)
+      (tls-enable-cipher tls)
+
       (send-finished sock tls)
       (print "=> send finished")
 
