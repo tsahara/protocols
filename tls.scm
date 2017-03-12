@@ -93,14 +93,62 @@
 
 (define *client-random* #f)
 
+;;
+;; <tls-mac>
+;;
+
+(define-class <tls-mac> ()
+  ((hasher :init-keyword :hasher) ;; => <message-digest-algorithm>
+   (key    :init-keyword :key)
+   (keylen :init-keyword :keylen)))
+
+(define-method tls-mac-digest ((tls-mac <tls-mac>) text)
+  (string->u8vector
+   (hmac-digest-string (u8vector->string text)
+		       :key (u8vector->string (slot-ref tls-mac 'key))
+		       :hasher (slot-ref tls-mac 'hasher))))
+
+(define-method tls-mac-key-length ((tls-mac <tls-mac>))
+  (slot-ref tls-mac 'keylen))
+
+
+;;
+;; <tls-mac-md5>
+;;
+
+(define-class <tls-mac-md5> (<tls-mac>) ())
+
+(define (make-tls-mac-md5 key)
+  (make <tls-mac-md5> :hasher <md5> :key key :keylen 16))
+
+;;
+;; <tls-mac-sha1>
+;;
+
+(define-class <tls-mac-sha1> (<tls-mac>) ())
+
+(define (make-tls-mac-sha1 key)
+  (make <tls-mac-sha1> :hasher <sha1> :key key :keylen 20))
+
+
+;;
+;; <tls-cipher>
+;;
 
 (define-class <tls-cipher> () ())
+
+;;
+;; <tls-cipher-null>
+;;
 
 (define-class <tls-cipher-null> (<tls-cipher>) ())
 
 (define (make-tls-cipher-null)
   (make <tls-cipher-null>))
 
+;;
+;; <tls-cipher-arcfour>
+;;
 
 (define-class <tls-cipher-arcfour> (<tls-cipher>)
   (arcfour))
@@ -121,6 +169,11 @@
 				   text)
   (arcfour-encrypt (slot-ref tls-cipher-arcfour 'arcfour) text))
 
+
+;;
+;; <tls-session>
+;;
+
 (define-class <tls-session> ()
   ((socket                  :init-value #f)
    (read-sequence-number    :init-value 0)
@@ -140,6 +193,8 @@
    (handshake-sha1          :init-form (make <sha1>))
    (client-write-cipher     :init-value #f) ;; <tls-cipher>
    (server-write-cipher     :init-value #f) ;; <tls-cipher>
+   (client-write-mac        :init-value #f) ;; <tls-mac>
+   (server-write-mac        :init-value #f) ;; <tls-mac>
    ))
 
 (define (make-tls socket)
@@ -162,17 +217,20 @@
 		      (u8vector-join (slot-ref tls 'client-hello-random)
 				     (slot-ref tls 'server-hello-random))
 		      48))
-  (let1 keys (tls-prf (slot-ref tls 'master-secret)
-		      "key expansion"
-		      (u8vector-join (slot-ref tls 'server-hello-random)
-				     (slot-ref tls 'client-hello-random))
-		      ;; XXX depends on mac/enc algorithms
-		      (+ 16 16 16 16 0 0)
-		      )
-    (slot-set! tls 'client-write-mac-secret (u8vector-copy keys  0 16))
-    (slot-set! tls 'server-write-mac-secret (u8vector-copy keys 16 32))
-    (slot-set! tls 'client-write-key (u8vector-copy keys 32 48))
-    (slot-set! tls 'server-write-key (u8vector-copy keys 48 64))
+  (let* ((maclen 20)  ;; XXX
+	 (keys (tls-prf (slot-ref tls 'master-secret)
+			"key expansion"
+			(u8vector-join (slot-ref tls 'server-hello-random)
+				       (slot-ref tls 'client-hello-random))
+			;; XXX depends on mac/enc algorithms
+			(+ (* 2 maclen) (* 2 16) 0 0)))
+	 (vport (open-input-uvector keys))
+	 (getkey (lambda (size)
+		   (read-uvector <u8vector> size vport))))
+    (slot-set! tls 'client-write-mac-secret (getkey maclen))
+    (slot-set! tls 'server-write-mac-secret (getkey maclen))
+    (slot-set! tls 'client-write-key (getkey 16))
+    (slot-set! tls 'server-write-key (getkey 16))
     ;; XXX iv
 
     (print "client-write-mac-secret:")
@@ -210,7 +268,8 @@
 			       (u8vector->list
 				(slot-ref tls 'client-hello-random))
 			       (list 0)            ; SessionID length
-			       (make-ciphersuite "TLS_RSA_WITH_RC4_128_MD5"
+			       (make-ciphersuite "TLS_RSA_WITH_RC4_128_SHA"
+						 "TLS_RSA_WITH_RC4_128_MD5"
 						 "TLS_RSA_WITH_NULL_MD5")
 			       (list 1 0)      ; compression_methods 0
 			       ))))
@@ -269,7 +328,7 @@
       (u8vector->list
        (tls-cipher-encrypt cipher (list->u8vector text)))))
 
-  (define (make-mac text)
+  (define (make-mac-old text)
     (u8vector->list
      (string->u8vector
       (hmac-digest-string (u8vector->string
@@ -281,8 +340,17 @@
 				(slot-ref tls 'client-write-mac-secret))
 			  :hasher <md5>))))
 
-  (let ((mac (make-mac payload)))
+  (define (make-mac tls text)
+    (u8vector->list
+     (tls-mac-digest (slot-ref tls 'client-write-mac)
+		     (apply u8vector
+			    (append (u64->list
+				     (tls-client-sequence-number tls))
+				    (make-tls-plaintext tls type text))))))
+
+  (let ((mac (make-mac tls payload)))
     ;; GenericStreamCipher
+    (print "mac = ")(hexdump (list->u8vector mac))
     (append (list type 3 1)
 	    (u16->list (+ (length payload) (length mac)))
 	    (encrypt tls (append payload mac)))))
@@ -544,6 +612,8 @@
 
 (define (tls-enable-cipher tls)
   (slot-set! tls 'do-encrypt #t)
+  (slot-set! tls 'client-write-mac
+	     (make-tls-mac-sha1 (slot-ref tls 'client-write-mac-secret)))
   (slot-set! tls 'client-write-cipher
 	     (make-tls-cipher-arcfour (slot-ref tls 'client-write-key)))
   )
