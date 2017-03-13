@@ -1,3 +1,7 @@
+(use binary.io)
+(use gauche.vport)
+(use srfi-19)
+
 (define (decode-x509-der uvec)
 
   ;; u8vector -> (values byte-length (tag class flag value))
