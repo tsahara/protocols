@@ -12,6 +12,7 @@
 (use binary.pack)
 (use gauche.collection)
 (use gauche.net)
+(use gauche.process)
 (use gauche.sequence)
 (use gauche.uvector)
 (use srfi-1)
@@ -50,11 +51,11 @@
     (slot-set! http2 'next-id (+ id 2))))
 
 (define (parse-frame-header frame)
-  (values (bit-field (get-u16 frame 0) 0 14)
-	  (get-u8 frame 2)
-	  (get-u8 frame 3)
-	  (bit-field (get-u32 frame 4) 0 31)
-	  (u8vector-copy frame 8)))
+  (values (get-u16be frame 1)
+	  (get-u8    frame 3)
+	  (get-u8    frame 4)
+	  (bit-field (get-u32 frame 5) 0 31)
+	  (u8vector-copy frame 9)))
 
 (define (get-frame-type frame)
   (get-u8 frame 2))
@@ -63,7 +64,7 @@
 
 (define (http2-receive-frame frame)
   (receive (len type flags stream-id payload)
-      (parse-frame-header frame)
+      (parse-frame-header #?=frame)
     (if (= type 0)
 	(if (logbit? 0 flags)
 	    (when *file*
@@ -206,13 +207,14 @@
   (let* ((plen (if (u8vector? payload)
 		   (u8vector-length payload)
 		   0))
-	 (uvec (make-u8vector (+ 8 plen))))
-    (put-u16! uvec 0 plen)
-    (u8vector-set! uvec 2 type)
-    (u8vector-set! uvec 3 flags)
-    (set32 uvec 4 stream-id)
+	 (uvec (make-u8vector (+ 9 plen))))
+    (put-u8!  uvec 0 0)
+    (put-u16! uvec 1 plen)
+    (u8vector-set! uvec 3 type)
+    (u8vector-set! uvec 4 flags)
+    (set32 uvec 5 stream-id)
     (if (> plen 0)
-	(u8vector-copy! uvec 8 payload))
+	(u8vector-copy! uvec 9 payload))
     uvec))
 
 (define *frame-type-data*       0)
@@ -256,12 +258,12 @@
     (let1 str (symbol->string sym)
       (+ 1 (find-index (cut string=? str <>)
 		       *settings-parameter-type-string*))))
-  
-  (let1 payload (make-u8vector (* 5 (length params)))
+
+  (let1 payload (make-u8vector (* 6 (length params)))
     (for-each-with-index (lambda (i pair)
-			   (put-u8!  payload (+ (* 5 i) 0)
+			   (put-u16be! payload (+ (* 6 i) 0)
 				     (settings-symbol->parameter (car pair)))
-			   (put-u32! payload (+ (* 5 i) 1) (cdr pair)))
+			   (put-u32! payload (+ (* 6 i) 2) (cdr pair)))
 			 params)
     (make-frame *frame-type-settings* 0 0 payload)))
 
@@ -387,21 +389,21 @@
 	  (huffman-decode l (lambda (str l) (values str l)))
 	  (values (list->string (map integer->char (take (cdr l) len)))
 		  (drop (cdr l) len)))))
-    
+
   (define (decode-header emit table l)
     (if (pair? l)
 	(let1 byte (car l)
 	  (cond
 	   ;; Indexed Header Field
-	   ((logbit? 7 byte) 
+	   ((logbit? 7 byte)
 	    (begin
 	      ;; first entry in static table is indexed 1
 	      (let1 pair (list-ref table (- (bit-field byte 0 7) 1))
 		(emit (car pair) (cadr pair))
 		(decode-header emit (cons pair table) (cdr l)))))
-	   
+
 	   ;; Literal Header Field with Incremental Indexing
-	   ((logbit? 6 byte) 
+	   ((logbit? 6 byte)
 	    (let* ((index (bit-field byte 0 6))
 		   (entry (list-ref table (- index 1))))
 	      (huffman-decode (cdr l) (lambda (str l)
@@ -425,7 +427,7 @@
 		  (decode-string-literal value-l)
 		(emit (car (list-ref table (- idx 1))) str)
 		(decode-header emit table next-l))))))))
-    
+
   (decode-header (lambda (name value)
 		   (format #t "  ~a: ~a\n" name value))
 		 (list-copy *static-table*)
@@ -469,7 +471,7 @@
 (define (dump-ping-frame len type flags stream-id payload)
   (format #t "  ~a\n"
 	  (string-join (map (cut format #f "~2,'0x" <>)
-			    paylaod)
+			    payload)
 		       " ")))
 
 (define (dump-goaway-frame len type flags stream-id payload)
@@ -478,7 +480,7 @@
 	  (bit-field (get-u32 payload 0) 0 31)
 	  (get-u32 payload 4)
 	  (u8vector->string (u8vector-copy payload 8))))
-  
+
 (define (dump-window-update-frame len type flags stream-id payload)
   (format #t "  r=~a window-size-increment=~a\n"
 	  (bit-field (get-u32 payload 0) 31 32)
@@ -495,7 +497,7 @@
     (format #t "dump: ")
     (dump-hexa frame)
     (format #t "\n"))
-  
+
   (let ((len       (bit-field (get-u16 frame 0) 0 14))
 	(type      (get-u8 frame 2))
 	(flags     (get-u8 frame 3))
@@ -543,12 +545,12 @@
 	 (conn (make-http2-connection sock)))
     (http2-send-prism-sequence sock)
     (send-settings-frame sock)
-    
+
     ;; receive server settings
     (print "receive settings sent by server:")
     ;(dump-frame-verbose sock)
     (send-settings-frame-ack sock)
-    
+
     (print "receive settings ack:")
     ;(dump-frame-verbose sock)
 
@@ -588,6 +590,16 @@
 (define (http2-get-old url)
   (receive (host port path) (parse-url url)
     (http2-old host port)))
+
+(define (main2)
+  (let* ((p (run-process '(cat -n)
+			 :redirects '((< 0 in) (> 1 out))))
+	 (cat-out (process-input  p 'in))
+	 (cat-in  (process-output p 'out)))
+    (format cat-out "hello\n\n")
+    (print #?=(read-char cat-in))
+    )
+  (exit))
 
 (define (main args)
   (default-endian 'big-endian)
