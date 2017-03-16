@@ -64,7 +64,7 @@
 
 (define (http2-receive-frame frame)
   (receive (len type flags stream-id payload)
-      (parse-frame-header #?=frame)
+      (parse-frame-header frame)
     (if (= type 0)
 	(if (logbit? 0 flags)
 	    (when *file*
@@ -107,19 +107,17 @@
       (values head tail)))
 
   (define (process-a-frame)
-    (if (>= (slot-ref conn 'read-pointer) 8)
-	(let ((len   (bit-field (get-u16 (slot-ref conn 'buffer) 0) 0 14))
-	      (type  (get-u8 (slot-ref conn 'buffer) 2))
-	      (flags (get-u8 (slot-ref conn 'buffer) 3))
-	      (id (bit-field (get-u32 (slot-ref conn 'buffer) 4) 0 31)))
-	  (if (>= (slot-ref conn 'read-pointer) (+ 8 len))
+    (if (>= (slot-ref conn 'read-pointer) 9)
+	(receive (len type flags stream-id payload)
+	    (parse-frame-header (slot-ref conn 'buffer))
+	  (if (>= (slot-ref conn 'read-pointer) (+ 9 len))
 	      (receive (frame buff)
-		  (u8vector-split (slot-ref conn 'buffer) (+ 8 len))
+		  (u8vector-split (slot-ref conn 'buffer) (+ 9 len))
 		(u8vector-copy! (slot-ref conn 'buffer)
 				0
 				buff)
 		(slot-set! conn 'read-pointer
-			   (- (slot-ref conn 'read-pointer) (+ 8 len)))
+			   (- (slot-ref conn 'read-pointer) (+ 9 len)))
 		(http2-receive-frame frame)
 		frame)
 	      #f))
@@ -525,9 +523,9 @@
 				(u8vector->string (u8vector-copy frame 8))))
       ((8) (dump-window-update-frame len type flags stream-id
 				(u8vector->string (u8vector-copy frame 8))))
-      ((#xB) (dump-blocked-frame len type flags stream-id
-				(u8vector->string (u8vector-copy frame 8))))
-      (else (print "  (XXX: not yet)")))))
+      ;;((9) (dump-continuation-frame len type flags stream-id
+      ;;			(u8vector->string (u8vector-copy frame 8))))
+      (else (print "  (unknown frame type)")))))
 
 (define (http2-old host port)
 
@@ -578,9 +576,14 @@
       (http2-close-connection http2)
       )))
 
-(define (usage)
-  (display "Usage: http2 <url>\n")
-  (exit 0))
+;;
+;; Event Driven Control Flow
+;;
+(define-class <event-loop> ()
+  ())
+
+(define (make-event-loop)
+  (make <event-loop>))
 
 (define (parse-url url)
   (rxmatch-let (rxmatch #/^http:\/\/([-A-Za-z\d.]+)(:(\d+))?(\/.*)?/ url)
@@ -592,18 +595,22 @@
     (http2-old host port)))
 
 (define (main2)
-  (let* ((p (run-process '(cat -n)
+  (let* ((p (run-process '(cat -n -u)
 			 :redirects '((< 0 in) (> 1 out))))
 	 (cat-out (process-input  p 'in))
 	 (cat-in  (process-output p 'out)))
-    (format cat-out "hello\n\n")
+    (set! (port-buffering cat-out) :none)
+    (set! (port-buffering cat-in) :none)
+    (format cat-out "hello\nfuga\n")
+    (flush cat-out)
     (print #?=(read-char cat-in))
     )
   (exit))
 
 (define (main args)
   (default-endian 'big-endian)
-  (if (= (length args) 2)
-      (http2-get (cadr args))
-      (usage))
-  0)
+  (unless (= (length args) 2)
+    (begin
+      (print "usage: http2 <url>\n")
+      (exit 1)))
+  (http2-get (cadr args)))
