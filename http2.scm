@@ -124,8 +124,8 @@
 	#f))
 
   (define (frame-is-settings-ack? frame)
-    (and (= (get-u8 frame  2) 4)
-	 (logtest (get-u8 frame 3) 1)))
+    (and (= (get-u8 frame 3) 4)
+	 (logtest (get-u8 frame 4) 1)))
 
   (define (frame-is-data? frame)
     (and frame
@@ -288,10 +288,10 @@
       (format #f "(unknown error code ~a)" code)))
 
 (define (http2-type->string type)
-  (if (<= type #xB)
+  (if (<= type 9)
       (list-ref '("DATA" "HEADERS" "PRIORITY" "RST_STREAM" "SETTINGS"
-		  "PUSH_PROMISE" "PING" "GOAWAY" "WINDOW_UPDATE" "CONTINUATION"
-		  "ALTSVC" "BLOCKED")
+		  "PUSH_PROMISE" "PING" "GOAWAY" "WINDOW_UPDATE"
+		  "CONTINUATION")
 		type)
       "(undefined)"))
 
