@@ -37,6 +37,7 @@
 
 (define (http2-connection-setup conn)
   (let ((sock (slot-ref conn 'socket)))
+    (event-loop-add-reader sock (lambda (io cond) (http2-read-socket conn)))
     (http2-connection-write conn "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
     (http2-connection-write conn (make-settings-frame
 				  '((SETTINGS_ENABLE_PUSH . 0)
@@ -45,6 +46,9 @@
 
     (http2-connection-write conn (make-settings-frame-ack))
     ))
+
+(define (http2-read-socket http2)
+  )
 
 (define (http2-next-stream-id http2)
   (rlet1 id (slot-ref http2 'next-id)
@@ -580,10 +584,13 @@
 ;; Event Driven Control Flow
 ;;
 (define-class <event-loop> ()
-  ())
+  (selector))
 
-(define (make-event-loop)
-  (make <event-loop>))
+(define *global-event-loop* (make <event-loop>))
+
+(define (event-loop-add-reader port-or-fd callback)
+  (selector-add! (slot-ref *global-event-loop* 'selector)
+		 port-or-fd callback '(r)))
 
 (define (parse-url url)
   (rxmatch-let (rxmatch #/^http:\/\/([-A-Za-z\d.]+)(:(\d+))?(\/.*)?/ url)
