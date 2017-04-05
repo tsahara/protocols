@@ -13,6 +13,7 @@
 (use gauche.collection)
 (use gauche.net)
 (use gauche.process)
+(use gauche.selector)
 (use gauche.sequence)
 (use gauche.uvector)
 (use srfi-1)
@@ -37,7 +38,8 @@
 
 (define (http2-connection-setup conn)
   (let ((sock (slot-ref conn 'socket)))
-    (event-loop-add-reader sock (lambda (io cond) (http2-read-socket conn)))
+    (event-loop-add-reader (socket-fd sock)
+			   (lambda (io cond) (http2-read-socket conn)))
     (http2-connection-write conn "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
     (http2-connection-write conn (make-settings-frame
 				  '((SETTINGS_ENABLE_PUSH . 0)
@@ -586,11 +588,19 @@
 (define-class <event-loop> ()
   (selector))
 
-(define *global-event-loop* (make <event-loop>))
+(define *global-event-loop*
+  (let ((evloop (make <event-loop>)))
+    (slot-set! evloop 'selector (make <selector>))
+    evloop
+    ))
 
 (define (event-loop-add-reader port-or-fd callback)
   (selector-add! (slot-ref *global-event-loop* 'selector)
 		 port-or-fd callback '(r)))
+
+;;
+;; Command line processing
+;;
 
 (define (parse-url url)
   (rxmatch-let (rxmatch #/^http:\/\/([-A-Za-z\d.]+)(:(\d+))?(\/.*)?/ url)
@@ -600,19 +610,6 @@
 (define (http2-get-old url)
   (receive (host port path) (parse-url url)
     (http2-old host port)))
-
-(define (main2)
-  (let* ((p (run-process '(cat -n -u)
-			 :redirects '((< 0 in) (> 1 out))))
-	 (cat-out (process-input  p 'in))
-	 (cat-in  (process-output p 'out)))
-    (set! (port-buffering cat-out) :none)
-    (set! (port-buffering cat-in) :none)
-    (format cat-out "hello\nfuga\n")
-    (flush cat-out)
-    (print #?=(read-char cat-in))
-    )
-  (exit))
 
 (define (main args)
   (default-endian 'big-endian)
