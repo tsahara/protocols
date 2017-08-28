@@ -23,6 +23,14 @@
     (while (not (binary-heap-empty? h))
       (print (binary-heap-pop-min! h)))))
 
+(define (events-empty)
+  (binaryheap-empty? *events*))
+
+(define (events-loop)
+  (while (not (binary-heap-empty? *events*))
+    (let1 e (binary-heap-pop-min! *events*)
+      )))
+
 (define (send-syn from to)
   (event-add rtt :syn '())
   )
