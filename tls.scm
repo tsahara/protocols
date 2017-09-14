@@ -253,14 +253,14 @@
 	     (list->u8vector
 	      (append (list 3 1) (insecure-random-sequence 46)))))
 
-(define (tls-client-hello tls)
-  (define (make-ciphersuite . str-list)
-    (let1 pair-list (append-map (lambda (str)
-				  (cdr (assoc str *ciphersuite-list*)))
-				str-list)
-      (append (u16->list (length pair-list))
-	      pair-list)))
+(define (make-ciphersuite . str-list)
+  (let1 pair-list (append-map (lambda (str)
+				(cdr (assoc str *ciphersuite-list*)))
+			      str-list)
+    (append (u16->list (length pair-list))
+	    pair-list)))
 
+(define (tls-client-hello tls :key ciphersuite)
   (tls-make-client-random tls)
   (list->u8vector
    (make-tls-handshake tls 1
@@ -268,9 +268,10 @@
 			       (u8vector->list
 				(slot-ref tls 'client-hello-random))
 			       (list 0)            ; SessionID length
-			       (make-ciphersuite "TLS_RSA_WITH_RC4_128_SHA"
-						 "TLS_RSA_WITH_RC4_128_MD5"
-						 "TLS_RSA_WITH_NULL_MD5")
+			       (or ciphersuite
+				   (make-ciphersuite "TLS_RSA_WITH_RC4_128_SHA"
+						     "TLS_RSA_WITH_RC4_128_MD5"
+						     "TLS_RSA_WITH_NULL_MD5"))
 			       (list 1 0)      ; compression_methods 0
 			       ))))
 
@@ -404,9 +405,9 @@
 (define (tls-change-cipher-spec tls)
   (make-tls-plaintext tls 20 (list 1)))
 
-(define (send-client-hello sock tls)
+(define (send-client-hello sock tls . rest)
   (format #t "send TLS Client Hello\n")
-  (socket-send sock (tls-client-hello tls)))
+  (socket-send sock (apply tls-client-hello (cons tls rest))))
 
 (define (send-tls-key-exchange sock tls e n)
   (format #t "send TLS Key Exchange: e=~a n=~a\n" e n)
@@ -621,6 +622,15 @@
 (define (tls-start-decryption tls)
   (slot-set! tls 'server-write-cipher
 	     (make-tls-cipher-arcfour (slot-ref tls 'server-write-key))))
+
+(define (main2 args)
+  (default-endian 'big-endian)
+  (let* ((sock (make-client-socket 'inet "localhost" 4433))
+	 (tls  (make-tls sock)))
+    (send-client-hello sock tls :ciphersuite (make-ciphersuite
+					      "TLS_RSA_WITH_RC4_128_MD5"))
+    (read-record (socket-input-port sock) tls)
+    ))
 
 (define (main args)
   (default-endian 'big-endian)
