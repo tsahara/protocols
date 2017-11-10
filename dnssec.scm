@@ -1,4 +1,5 @@
 ;(use femto.dns)
+(use binary.io)
 (use gauche.uvector)
 (use rfc.base64)
 
@@ -39,6 +40,31 @@
 ;; RFC5702 6.1
 (define example-net-dnskey "AwEAAcFcGsaxxdgiuuGmCkVI my4h99CqT7jwY3pexPGcnUFtR2Fh36BponcwtkZ4cAgtvd4Qs8P kxUdp6p/DlUmObdk=")
 
+(define example-net-rrsig-sig "kRCOH6u7l0QGy9qpC9 l1sLncJcOKFLJ7GhiUOibu4teYp5VE9RncriShZNz85mwlMgNEa cFYK/lPtPiVYP4bwg==")
+
+(define (dnskey->rsa-key str)
+  (let ((port (open-input-string (base64-decode-string str))))
+    (let1 byte0 (read-u8 port)
+      (let1 exp-len (if (= byte0 0)
+			(+ (* 256 (read-u8 port))
+			   (read-u8 port))
+			byte0)
+	(format #t "exp len = ~a\n" exp-len)
+	(let1 exp (read-uint exp-len port)
+	  (format #t "exp = ~a\n" exp)
+
+	)))))
+
+
+(dnskey->rsa-key example-net-dnskey)
+
+(let ((uv (string->u8vector (base64-decode-string example-net-rrsig-sig))))
+  )
+
+;; www.example.net. 3600  IN  RRSIG  (A 8 3 3600 20300101000000
+;;                     20000101000000 9033 example.net. kRCOH6u7l0QGy9qpC9
+;;                     l1sLncJcOKFLJ7GhiUOibu4teYp5VE9RncriShZNz85mwlMgNEa
+;;                     cFYK/lPtPiVYP4bwg==);{id = 9033}
 
 
 (let ((uv (string->u8vector (base64-decode-string dnskey-pubkey))))
