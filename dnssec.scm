@@ -50,11 +50,12 @@
 			   (read-u8 port))
 			byte0)
 	(format #t "exp len = ~a\n" exp-len)
-	(let1 exp (read-uint exp-len port)
-	  (format #t "exp = ~a\n" exp)
-
-	)))))
-
+	(let* ((exp (read-uint exp-len port))
+	       (modulo (read-uint (string-length
+				   (get-remaining-input-string port))
+				  port)))
+	  (format #t "exp=~a, modulo=~a\n" exp modulo)
+	  (values exp modulo))))))
 
 (dnskey->rsa-key example-net-dnskey)
 
