@@ -1,11 +1,8 @@
 ;(use femto.dns)
 (use binary.io)
+(use gauche.collection)
 (use gauche.uvector)
 (use rfc.base64)
-
-(base64-decode-string "AwEAAagAIKlVZrpC6Ia7gEzahOR+9W29euxhJhVVLOyQbSEW0OgcCjF")
-
-"49AAC11D7B6F6446702E54A1607371607A1A41855200FD2CE1CDDE32F24E8FB5"
 
 (define (calc-keytag uv)
   (let ((len (u8vector-length uv))
@@ -50,17 +47,33 @@
 			   (read-u8 port))
 			byte0)
 	(format #t "exp len = ~a\n" exp-len)
-	(let* ((exp (read-uint exp-len port))
+	(let* ((exp (read-uint exp-len port 'big-endian))
 	       (modulo (read-uint (string-length
 				   (get-remaining-input-string port))
-				  port)))
+				  port
+				  'big-endian)))
 	  (format #t "exp=~a, modulo=~a\n" exp modulo)
 	  (values exp modulo))))))
 
-(dnskey->rsa-key example-net-dnskey)
+(receive (e n)
+    (dnskey->rsa-key example-net-dnskey)
+  (let* ((str   (base64-decode-string example-net-rrsig-sig))
+	 (port  (open-input-string str))
+	 (em    (read-uint (string-length str) port 'big-endian))
+	 (dec   (expt-mod em e n))
+	 (asn1  (call-with-output-string
+		  (lambda (port)
+		    (write-uint (ceiling->exact (log dec 256))
+				dec
+				port
+				'big-endian)))))
+    #?=asn1
+    ))
 
-(let ((uv (string->u8vector (base64-decode-string example-net-rrsig-sig))))
-  )
+
+;; ce 26 e9 ce f9 10 0c 7c e1 84 c2 cf 3c 6b 78 5b c6 21 58 4f 60 62 12 6b 4c 2e 08 da 7b a9 5b 90 93 8f 23 75 be 9a 01 fb e8 89 88 42 ad 76 a9 29 c5 63 f4 26 37 4b b1 18 24 9a 73 4b 09 b0 5d a3 keytag => 46809
+
+
 
 ;; www.example.net. 3600  IN  RRSIG  (A 8 3 3600 20300101000000
 ;;                     20000101000000 9033 example.net. kRCOH6u7l0QGy9qpC9
