@@ -55,19 +55,53 @@
 	  (format #t "exp=~a, modulo=~a\n" exp modulo)
 	  (values exp modulo))))))
 
+(define (parse-encrypted-block asn1)
+  (let1 block-type (u8vector-ref asn1 0)
+    (let loop ((i 1))
+      (if (= (u8vector-ref asn1 i) #xff)
+	  (loop (+ i 1))
+	  (begin
+	    (unless (= (u8vector-ref asn1 i) 0)
+	      (error "paddings must be followed by 0"))
+	    (u8vector-copy asn1 (+ i 1)))))))
+
+(define (u8vector-compare uv1 uv2 len)
+  (let loop ((i 0))
+    (if (= i len)
+	#t
+	(if (eq? (u8vector-ref uv1 i) (u8vector-ref uv2 i))
+	    (loop (+ i 1))
+	    #f))))
+
+(define sha256-prefix (u8vector #x30 #x31 #x30 #x0d #x06 #x09 #x60
+				#x86 #x48 #x01 #x65 #x03 #x04 #x02
+				#x01 #x05 #x00 #x04 #x20))
+
+(define sha512-prefix (u8vector #x30 #x51 #x30 #x0d #x06 #x09 #x60
+				#x86 #x48 #x01 #x65 #x03 #x04 #x02
+				#x03 #x05 #x00 #x04 #x40))
+
+
 (receive (e n)
     (dnskey->rsa-key example-net-dnskey)
   (let* ((str   (base64-decode-string example-net-rrsig-sig))
 	 (port  (open-input-string str))
 	 (em    (read-uint (string-length str) port 'big-endian))
 	 (dec   (expt-mod em e n))
-	 (asn1  (call-with-output-string
-		  (lambda (port)
-		    (write-uint (ceiling->exact (log dec 256))
-				dec
-				port
-				'big-endian)))))
-    #?=asn1
+	 (encrypted-block (string->u8vector
+			   (call-with-output-string
+			     (lambda (port)
+			       (write-uint (ceiling->exact (log dec 256))
+					   dec
+					   port
+					   'big-endian)))))
+	 (data  (parse-encrypted-block encrypted-block))
+	 (hash  (u8vector-copy data 19)))
+
+    (unless (u8vector-compare data sha256-prefix 19)
+      (error "unknown prefix"))
+
+    (format #t "hash from rrsig: ~a\n" hash)
     ))
 
 
