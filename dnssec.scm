@@ -81,6 +81,22 @@
 				#x86 #x48 #x01 #x65 #x03 #x04 #x02
 				#x03 #x05 #x00 #x04 #x40))
 
+(define (make-rrsig signers-name)
+  (define (encode-name str)
+    (apply u8vector-append
+	   (map (lambda (label)
+		  (u8vector-append (u8vector (string-length label))
+				   (string->u8vector label)))
+		(string-split (if (eq? (string-ref str
+						   (- (string-length str) 1))
+				       #\.)
+				  str
+				  (string-append str "."))
+			      #\.))))
+
+  (let ((uv (make-u8vector (+ 18 (string-length signers-name)))))
+    #?=(encode-name signers-name)
+    ))
 
 (receive (e n)
     (dnskey->rsa-key example-net-dnskey)
@@ -102,6 +118,8 @@
       (error "unknown prefix"))
 
     (format #t "hash from rrsig: ~a\n" hash)
+
+    (make-rrsig "example.net")
     ))
 
 
