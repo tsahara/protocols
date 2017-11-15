@@ -1,8 +1,11 @@
 ;(use femto.dns)
 (use binary.io)
+(use binary.pack)
 (use gauche.collection)
 (use gauche.uvector)
 (use rfc.base64)
+(use rfc.sha)
+(use srfi-19)
 
 (define (calc-keytag uv)
   (let ((len (u8vector-length uv))
@@ -81,7 +84,12 @@
 				#x86 #x48 #x01 #x65 #x03 #x04 #x02
 				#x03 #x05 #x00 #x04 #x40))
 
-(define (make-rrsig signers-name)
+;; www.example.net. 3600  IN  RRSIG  (A 8 3 3600 20300101000000
+;;                     20000101000000 9033 example.net. kRCOH6u7l0QGy9qpC9
+;;                     l1sLncJcOKFLJ7GhiUOibu4teYp5VE9RncriShZNz85mwlMgNEa
+;;                     cFYK/lPtPiVYP4bwg==);{id = 9033}
+
+(define (validate-rrsig)
   (define (encode-name str)
     (apply u8vector-append
 	   (map (lambda (label)
@@ -94,44 +102,68 @@
 				  (string-append str "."))
 			      #\.))))
 
-  (let ((uv (make-u8vector (+ 18 (string-length signers-name)))))
-    #?=(encode-name signers-name)
-    ))
+  (define (make-hash-from-data signer)
+    (define (make-unixtime str)
+      (time->seconds
+       (date->time-utc
+	(string->date (string-append str "+0000")
+		      "~Y~m~d~H~M~S~z"))))
 
-(receive (e n)
-    (dnskey->rsa-key example-net-dnskey)
-  (let* ((str   (base64-decode-string example-net-rrsig-sig))
-	 (port  (open-input-string str))
-	 (em    (read-uint (string-length str) port 'big-endian))
-	 (dec   (expt-mod em e n))
-	 (encrypted-block (string->u8vector
-			   (call-with-output-string
-			     (lambda (port)
-			       (write-uint (ceiling->exact (log dec 256))
-					   dec
-					   port
-					   'big-endian)))))
-	 (data  (parse-encrypted-block encrypted-block))
-	 (hash  (u8vector-copy data 19)))
+    (define (make-rrsig-rdata)
+      (u8vector-append (string->u8vector
+			(pack "nCCNNNn" `(1
+					  8
+					  3
+					  3600
+					  ,(make-unixtime "20300101000000")
+					  ,(make-unixtime "20000101000000")
+					  9033)
+			      :to-string? #t))
+		       (encode-name signer)))
 
-    (unless (u8vector-compare data sha256-prefix 19)
-      (error "unknown prefix"))
+    ;; www.example.net. 3600  IN  A  192.0.2.91
+    (define (make-rr)
+      (u8vector-append (encode-name "www.example.net")
+		       (string->u8vector
+			(pack "nnNn" `(1
+				       1
+				       3600
+				       4)
+			      :to-string? #t))
+		       (u8vector 192 0 2 91)))
 
-    (format #t "hash from rrsig: ~a\n" hash)
+    (string->u8vector
+     (sha256-digest-string
+      (u8vector->string
+       (u8vector-append (make-rrsig-rdata)
+			(make-rr))))))
 
-    (make-rrsig "example.net")
-    ))
+  (receive (e n)
+      (dnskey->rsa-key example-net-dnskey)
+    (let* ((str   (base64-decode-string example-net-rrsig-sig))
+	   (port  (open-input-string str))
+	   (em    (read-uint (string-length str) port 'big-endian))
+	   (dec   (expt-mod em e n))
+	   (encrypted-block (string->u8vector
+			     (call-with-output-string
+			       (lambda (port)
+				 (write-uint (ceiling->exact (log dec 256))
+					     dec
+					     port
+					     'big-endian)))))
+	   (data  (parse-encrypted-block encrypted-block))
+	   (hash  (u8vector-copy data 19)))
 
+      (unless (u8vector-compare data sha256-prefix 19)
+	(error "unknown prefix"))
+
+      (format #t "hash from rrsig: ~a\n" hash)
+      (format #t "hash from data:  ~a\n"
+	      (make-hash-from-data "example.net"))
+      )))
+(validate-rrsig)
 
 ;; ce 26 e9 ce f9 10 0c 7c e1 84 c2 cf 3c 6b 78 5b c6 21 58 4f 60 62 12 6b 4c 2e 08 da 7b a9 5b 90 93 8f 23 75 be 9a 01 fb e8 89 88 42 ad 76 a9 29 c5 63 f4 26 37 4b b1 18 24 9a 73 4b 09 b0 5d a3 keytag => 46809
-
-
-
-;; www.example.net. 3600  IN  RRSIG  (A 8 3 3600 20300101000000
-;;                     20000101000000 9033 example.net. kRCOH6u7l0QGy9qpC9
-;;                     l1sLncJcOKFLJ7GhiUOibu4teYp5VE9RncriShZNz85mwlMgNEa
-;;                     cFYK/lPtPiVYP4bwg==);{id = 9033}
-
 
 (let ((uv (string->u8vector (base64-decode-string dnskey-pubkey))))
   (let* ((elen   (u8vector-ref uv 0))
