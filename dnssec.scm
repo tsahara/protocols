@@ -5,7 +5,14 @@
 (use gauche.uvector)
 (use rfc.base64)
 (use rfc.sha)
+(use srfi-13)
 (use srfi-19)
+(use sxml.ssax)
+
+#;(define (load-trust-anchor)
+  (let1 sxml (ssax:xml->sxml (open-input-file "root-anchors.xml") '())
+    ))
+;(print (load-trust-anchor))
 
 (define (calc-keytag uv)
   (let ((len (u8vector-length uv))
@@ -89,19 +96,19 @@
 ;;                     l1sLncJcOKFLJ7GhiUOibu4teYp5VE9RncriShZNz85mwlMgNEa
 ;;                     cFYK/lPtPiVYP4bwg==);{id = 9033}
 
-(define (validate-rrsig)
-  (define (encode-name str)
-    (apply u8vector-append
-	   (map (lambda (label)
-		  (u8vector-append (u8vector (string-length label))
-				   (string->u8vector label)))
-		(string-split (if (eq? (string-ref str
-						   (- (string-length str) 1))
-				       #\.)
-				  str
-				  (string-append str "."))
-			      #\.))))
+(define (dns-encode-name str)
+  (apply u8vector-append
+	 (map (lambda (label)
+		(u8vector-append (u8vector (string-length label))
+				 (string->u8vector label)))
+	      (string-split (if (eq? (string-ref str
+						 (- (string-length str) 1))
+				     #\.)
+				str
+				(string-append str "."))
+			    #\.))))
 
+(define (validate-rrsig)
   (define (make-hash-from-data signer)
     (define (make-unixtime str)
       (time->seconds
@@ -119,11 +126,11 @@
 					  ,(make-unixtime "20000101000000")
 					  9033)
 			      :to-string? #t))
-		       (encode-name signer)))
+		       (dns-encode-name signer)))
 
     ;; www.example.net. 3600  IN  A  192.0.2.91
     (define (make-rr)
-      (u8vector-append (encode-name "www.example.net")
+      (u8vector-append (dns-encode-name "www.example.net")
 		       (string->u8vector
 			(pack "nnNn" `(1
 				       1
@@ -165,13 +172,36 @@
 
 ;; ce 26 e9 ce f9 10 0c 7c e1 84 c2 cf 3c 6b 78 5b c6 21 58 4f 60 62 12 6b 4c 2e 08 da 7b a9 5b 90 93 8f 23 75 be 9a 01 fb e8 89 88 42 ad 76 a9 29 c5 63 f4 26 37 4b b1 18 24 9a 73 4b 09 b0 5d a3 keytag => 46809
 
-(let ((uv (string->u8vector (base64-decode-string dnskey-pubkey))))
-  (let* ((elen   (u8vector-ref uv 0))
-	 (uv-exp (u8vector 1 (+ 1 elen)))
-	 (uv-mod (u8vector (+ 1 elen)))
-	 (raw    (u8vector-append (u8vector 1 0 3 8) uv)))
-    (format #t "keytag => ~a\n" (calc-keytag raw))))
+(define (dnskey-pubkey->keytag dnskey-rdata)
+  (let ((uv (string->u8vector (base64-decode-string dnskey-rdata))))
+    (let* ((elen   (u8vector-ref uv 0))
+	   (uv-exp (u8vector 1 (+ 1 elen)))
+	   (uv-mod (u8vector (+ 1 elen)))
+	   (raw    (u8vector-append (u8vector 1 0 3 8) uv)))
+      (calc-keytag raw))))
 
+(format #t "keytag => ~a\n" (dnskey-pubkey->keytag dnskey-pubkey))
+
+;;
+;; Parse Trust Anchor
+;;
+
+(define trust-anchor-1 '(19036 . "49AAC11D7B6F6446702E54A1607371607A1A41855200FD2CE1CDDE32F24E8FB5"))
+
+(define turst-anchor-2 '(20326 . "E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"))
+
+
+(let1 rdata (string-append (pack "nCC" `(257 3 8) :to-string? #t)
+			   (base64-decode-string "AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3 +/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kv ArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF 0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+e oZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfd RUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwN R1AkUTV74bU="))
+  (format #t "2: keytag=~a, hash=~a\n"
+	  (calc-keytag (string->u8vector rdata))
+	  (string-upcase
+	   (digest-hexify
+	    (sha256-digest-string
+	     (string-append (make-byte-string 1 0)
+			    rdata))))))
+
+#?=(dns-encode-name ".")
 
 ;;jp.			47880	IN	DS	31714 8 1 B6CB06C153CB0C73BCEBA9914BAF16F26A9B931E
 ;;jp.			47880	IN	DS	31714 8 2 612693CC16178D788F6A2733E4F01647B027FAE678CB3BF92EC4143F 67A559D8
