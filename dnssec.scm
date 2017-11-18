@@ -97,16 +97,18 @@
 ;;                     cFYK/lPtPiVYP4bwg==);{id = 9033}
 
 (define (dns-encode-name str)
-  (apply u8vector-append
-	 (map (lambda (label)
-		(u8vector-append (u8vector (string-length label))
-				 (string->u8vector label)))
-	      (string-split (if (eq? (string-ref str
-						 (- (string-length str) 1))
-				     #\.)
-				str
-				(string-append str "."))
-			    #\.))))
+  (define (string-last-char str)
+    (string-ref str (- (string-length str) 1)))
+  (if (string=? "." str)
+      "\0"
+      (apply u8vector-append
+	     (map (lambda (label)
+		    (u8vector-append (u8vector (string-length label))
+				     (string->u8vector label)))
+		  (string-split (if (eq? #\. (string-last-char str))
+				    str
+				    (string-append str "."))
+				#\.)))))
 
 (define (validate-rrsig)
   (define (make-hash-from-data signer)
