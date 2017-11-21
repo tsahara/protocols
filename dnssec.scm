@@ -1,4 +1,3 @@
-;(use femto.dns)
 (use binary.io)
 (use binary.pack)
 (use gauche.collection)
@@ -190,18 +189,21 @@
 
 (define trust-anchor-1 '(19036 . "49AAC11D7B6F6446702E54A1607371607A1A41855200FD2CE1CDDE32F24E8FB5"))
 
-(define turst-anchor-2 '(20326 . "E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"))
+(define trust-anchor-2 '(20326 . "E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"))
 
+(define root-dnskey-2 "AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3 +/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kv ArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF 0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+e oZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfd RUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwN R1AkUTV74bU=")
 
-(let1 rdata (string-append (pack "nCC" `(257 3 8) :to-string? #t)
-			   (base64-decode-string "AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3 +/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kv ArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF 0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+e oZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfd RUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwN R1AkUTV74bU="))
-  (format #t "2: keytag=~a, hash=~a\n"
-	  (calc-keytag (string->u8vector rdata))
-	  (string-upcase
-	   (digest-hexify
-	    (sha256-digest-string
-	     (string-append (make-byte-string 1 0)
-			    rdata))))))
+(let1 digest-from-dnskey
+    (let1 rdata (string-append (pack "nCC" `(257 3 8) :to-string? #t)
+			       (base64-decode-string root-dnskey-2))
+      (string-upcase
+       (digest-hexify
+	(sha256-digest-string
+	 (string-append (make-byte-string 1 0)
+			rdata)))))
+  (format #t "from DNSKEY => ~a\n" digest-from-dnskey)
+  (format #t "trust anchor > ~a\n" (cdr trust-anchor-2))
+  )
 
 #?=(dns-encode-name ".")
 
