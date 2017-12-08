@@ -3,6 +3,9 @@
 
 ;; This implementation is based on RFC1321.
 
+(define (md5-padding-length len)
+  (modulo (- 0 8 len) 64))
+
 (define (u8vector->hexstring uv)
   (string-join (map (cut format "~2,'0x" <>) uv) ""))
 
@@ -17,6 +20,13 @@
     uv))
 
 (define (md5 string)
+  (let* ((padlen (md5-padding-length (string-length string)))
+	 (uv     (u8vector-append (string->u8vector string)
+				  (u8vector #x80)
+				  (make-u8vector (- padlen 1) 0)
+				  ))))
+
+
   (hexstring->u8vector "d41d8cd98f00b204e9800998ecf8427e"))
 
 (for-each (lambda (pair)
