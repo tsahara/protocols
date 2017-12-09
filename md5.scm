@@ -1,3 +1,4 @@
+(use binary.io)
 (use gauche.collection)
 (use gauche.uvector)
 
@@ -24,10 +25,14 @@
 	 (uv     (u8vector-append (string->u8vector string)
 				  (u8vector #x80)
 				  (make-u8vector (- padlen 1) 0)
-				  ))))
-
-
-  (hexstring->u8vector "d41d8cd98f00b204e9800998ecf8427e"))
+				  (string->u8vector
+				   (with-output-to-string
+				     (lambda()
+				       (write-u64 (string-length string)
+						  (current-output-port)
+						  'big-endian)))))))
+    (u8vector->hexstring uv)))
+;;(print (md5 "ac"))
 
 (for-each (lambda (pair)
 	    (let ((input  (car pair))
