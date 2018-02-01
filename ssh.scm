@@ -2,6 +2,25 @@
 (use gauche.net)
 (use gauche.uvector)
 
+(define-class <ssh-client> ()
+  (host
+   port
+   socket
+   mac-client-to-server
+   mac-server-to-client
+  ))
+
+(define (make-ssh-client host :key (port 22))
+  (let1 ssh (make <ssh-client>)
+	(slot-set! ssh 'host host)
+	(slot-set! ssh 'port port)
+	ssh))
+
+(define (ssh-connect ssh)
+  (slot-set! ssh 'socket (make-client-socket 'inet
+					     (slot-ref ssh 'host)
+					     (slot-ref ssh 'port))))
+
 (define read-uint32 read-u32)
 
 (define (read-u32be port)
@@ -83,12 +102,14 @@
   (let1 klass (list-ref msgmap type)
     (make klass :type type :len len :data data)))
 
-(define (ssh-read-packet port)
-  (let* ((packet_length  (read-u32be port))
+(define (ssh-read-packet ssh)
+  (let* ((port           (socket-input-port (slot-ref ssh 'socket)))
+	 (packet_length  (read-u32be port))
 	 (padding_length (read-u8    port))
 	 (payload        (read-uvector <u8vector>
-				       (- packet_length padding_length 1)))
-	 (padding        (read-uvector <u8vector> padding_length))
+					  (- packet_length padding_length 1)
+					  port))
+	 (padding        (read-uvector <u8vector> padding_length port))
 	 )
     (format #t "ssh packet: len=~a, type=~a\n"
 	    packet_length
@@ -96,17 +117,17 @@
     payload))
 
 (define (ssh-login)
-  (define hostname "localhost")
-  (define port 2022)
-  (call-with-client-socket
-   (make-client-socket 'inet hostname port)
-   (lambda (in out)
-     (let ((client-version-string "SSH-2.0-femto\r\n")
-	   (server-version-string (read-line in)))
-       (format out client-version-string)
-       (format #t "server version string: ~a\n" server-version-string)
+  (let ((ssh (make-ssh-client "localhost" :port 2022)))
+    (ssh-connect ssh)
 
-       (ssh-read-packet in))
-     )))
+    (let ((sock (slot-ref ssh 'socket)))
+      (socket-send sock "SSH-2.0-femto\r\n")
+      (format #t "server version string: ~a\n"
+	      (socket-recv sock 1024))
+
+      (ssh-read-packet ssh)
+      ;;(socket-send sock (make-kexinit))
+      )))
 
 (ssh-login)
+(gc)
