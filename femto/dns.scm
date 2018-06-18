@@ -245,7 +245,7 @@
                          (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
             (arloop (+ i 1)))))
     dnsp))
-     
+
 
 (define (show-dns-packet vec len)
   (define (signer-name->string vec offset)
@@ -259,11 +259,11 @@
                    (cons (u8vector->string vec (+ i 1) (+ i 1 n))
                          labels)))))
      "."))
-    
+
 
   (define (unixtime->iso8601-string sec)
     (date->string (time-utc->date (make-time time-utc 0 sec)) "~4"))
-    
+
   (define (show-query vec offset)
     (receive (qname qtype qclass len)        ; RFC1035 4.1.2
 	(parse-question-section vec offset)
