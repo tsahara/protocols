@@ -13,6 +13,7 @@
           dns-class-in
           dns-class-any
           dns-read-resolv-conf
+	  dns-query
           dns-type-a
           dns-type-ns
           dns-type-cname
@@ -42,6 +43,12 @@
 (define dns-type-rrsig  49)
 (define dns-type-axfr	252)
 (define dns-type-any	255)
+
+(define dns-type-alist '(("a"     . 1)
+			 ("ns"    . 2)
+			 ("cname" . 5)
+			 ("aaaa"  . 28)
+			 ))
 
 (define-class <dns-rr> ()
   ((name) (class) (type)))
@@ -247,7 +254,7 @@
     dnsp))
 
 
-(define (show-dns-packet vec len)
+(define (show-dns-packet vec)
   (define (signer-name->string vec offset)
     (string-join
      (let loop ((i offset)
@@ -319,7 +326,7 @@
   (format #t "ANCOUNT=~a, " (get-u16be vec 6))
   (format #t "NSCOUNT=~a, " (get-u16be vec 8))
   (format #t "ARCOUNT=~a\n" (get-u16be vec 10))
-  (let ((dnsp (parse-dns-packet0 vec len)))
+  (let ((dnsp (parse-dns-packet0 vec (u8vector-length vec))))
     (print "Question:")
     (show-query (vector-ref dnsp 0) (vector-ref (vector-ref dnsp 2) 0))
     (print "Answer:")
@@ -353,5 +360,30 @@
 		(port->string-list port)))))
 
 (define (dns-server) *dns-server*)
+
+(define (dns-query name :key type)
+  (define (make-udp-socket host)
+    (receive (addr af)
+	(inet-string->address host)
+      (make-socket af SOCK_DGRAM)))
+
+  (if (string? type)
+      (let1 pair (assoc type dns-type-alist)
+	(unless pair
+	  (errorf "no such type: ~a" type))
+	(set! type (cdr pair))))
+
+  (dns-read-resolv-conf)
+  (let ((uv (make-dns-query name type))
+	(sa (car (make-sockaddrs *dns-server* 53 'udp)))
+	(recvbuf (make-u8vector 4096)))
+    (receive (_ af)
+	(inet-string->address *dns-server*)
+      (let1 sock (make-socket af SOCK_DGRAM)
+	(socket-connect sock sa)
+	(let1 len (socket-send sock uv)
+	  (socket-recv! sock recvbuf)
+	  recvbuf
+	  )))))
 
 (provide "femto.dns")
