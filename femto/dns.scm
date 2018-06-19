@@ -10,6 +10,7 @@
           make-dns-query
           parse-dns-packet
           dns-packet-question-rr
+          dns-packet-answers
           dns-class-in
           dns-class-any
           dns-read-resolv-conf
@@ -48,6 +49,7 @@
 			 ("ns"    . 2)
 			 ("cname" . 5)
 			 ("aaaa"  . 28)
+			 ("caa"   . 257)
 			 ))
 
 (define-class <dns-rr> ()
@@ -69,10 +71,17 @@
 
 
 (define-class <dns-packet> ()
-  ((bytes)))
+  (bytes
+   answers-offset))
 
 (define-method write-object ((dnsp <dns-packet>) out)
   (format out "#<dns-packet>"))
+
+(define-method answers ((dnspkt <dns-packet>))
+  (let ((bytes (slot-ref dnspkt 'bytes)))
+    (receive (_ _ _ len)
+	(parse-question-section bytes 24)
+      (format #t "offset is ~a" len))))
 
 (define (parse-dns-packet vec len)
   (let ((dnsp (make <dns-packet>))
@@ -82,42 +91,42 @@
         (nscount (get-u16be vec 8))
         (arcount (get-u16be vec 10))
         (ptr 12))
-    (vector-set! dnsp 2 (make-vector qdcount))
-    (vector-set! dnsp 3 (make-vector ancount))
-    (vector-set! dnsp 4 (make-vector nscount))
-    (vector-set! dnsp 5 (make-vector arcount))
-    (let qdloop ((i 0))
-      (if (< i qdcount)
-          (receive (qname qtype qclass len)
-              (parse-question-section buf ptr)
-            (vector-set! (vector-ref dnsp 2) i ptr)
-            (set! ptr (+ ptr len))
-            (qdloop (+ i 1)))))
-    (let anloop ((i 0))
-      (if (< i ancount)
-          (receive (name namelen)
-              (get-name buf ptr)
-            (vector-set! (vector-ref dnsp 3) i ptr)
-            (set! ptr (+ ptr namelen 10
-                         (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
-            (anloop (+ i 1)))))
-    (let nsloop ((i 0))
-      (if (< i nscount)
-          (receive (name namelen)
-              (get-name buf ptr)
-            (vector-set! (vector-ref dnsp 4) i ptr)
-            (set! ptr (+ ptr namelen 10
-                         (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
-            (nsloop (+ i 1)))))
-    (let arloop ((i 0))
-      (if (< i arcount)
-          (receive (name namelen)
-              (get-name buf ptr)
-            (vector-set! (vector-ref dnsp 5) i ptr)
-            (set! ptr (+ ptr namelen 10
-                         (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
-            (arloop (+ i 1)))))
-    dnsp))
+    (let ((questions   (make-vector qdcount))
+	  (answers     (make-vector ancount))
+	  (authorities (make-vector nscount))
+	  (additionals (make-vector arcount)))
+      (let qdloop ((i 0))
+	(if (< i qdcount)
+            (receive (qname qtype qclass len)
+		(parse-question-section buf ptr)
+              (vector-set! (vector-ref dnsp 2) i ptr)
+              (set! ptr (+ ptr len))
+              (qdloop (+ i 1)))))
+      (let anloop ((i 0))
+	(if (< i ancount)
+            (receive (name namelen)
+		(get-name buf ptr)
+              (vector-set! (vector-ref dnsp 3) i ptr)
+              (set! ptr (+ ptr namelen 10
+                           (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
+              (anloop (+ i 1)))))
+      (let nsloop ((i 0))
+	(if (< i nscount)
+            (receive (name namelen)
+		(get-name buf ptr)
+              (vector-set! (vector-ref dnsp 4) i ptr)
+              (set! ptr (+ ptr namelen 10
+                           (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
+              (nsloop (+ i 1)))))
+      (let arloop ((i 0))
+	(if (< i arcount)
+            (receive (name namelen)
+		(get-name buf ptr)
+              (vector-set! (vector-ref dnsp 5) i ptr)
+              (set! ptr (+ ptr namelen 10
+                           (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
+              (arloop (+ i 1)))))
+      dnsp)))
 
 
 
@@ -148,12 +157,6 @@
     (list->u8vector (append (u8vector->list header)
 			    (u8vector->list (pktbuf->u8vector qsec))))
     ))
-
-(define (make-dns-packet0)
-  (make-dns-query "www.kame.net" dns-type-a))
-
-(define (make-dns-packet)
-  (make-dns-query "www.kame.net" dns-type-aaaa))
 
 (define (get-name vec offset)
   (define (label->string vec offset len)
@@ -381,9 +384,9 @@
 	(inet-string->address *dns-server*)
       (let1 sock (make-socket af SOCK_DGRAM)
 	(socket-connect sock sa)
-	(let1 len (socket-send sock uv)
-	  (socket-recv! sock recvbuf)
-	  recvbuf
+	(socket-send sock uv)
+	(let1 rlen (socket-recv! sock recvbuf)
+	  (parse-dns-packet recvbuf rlen)
 	  )))))
 
 (provide "femto.dns")
