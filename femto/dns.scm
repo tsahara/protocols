@@ -95,37 +95,30 @@
 	  (answers     (make-vector ancount))
 	  (authorities (make-vector nscount))
 	  (additionals (make-vector arcount)))
-      (let qdloop ((i 0))
-	(if (< i qdcount)
-            (receive (qname qtype qclass len)
-		(parse-question-section buf ptr)
-              (vector-set! (vector-ref dnsp 2) i ptr)
-              (set! ptr (+ ptr len))
-              (qdloop (+ i 1)))))
-      (let anloop ((i 0))
-	(if (< i ancount)
-            (receive (name namelen)
-		(get-name buf ptr)
-              (vector-set! (vector-ref dnsp 3) i ptr)
-              (set! ptr (+ ptr namelen 10
-                           (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
-              (anloop (+ i 1)))))
-      (let nsloop ((i 0))
-	(if (< i nscount)
-            (receive (name namelen)
-		(get-name buf ptr)
-              (vector-set! (vector-ref dnsp 4) i ptr)
-              (set! ptr (+ ptr namelen 10
-                           (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
-              (nsloop (+ i 1)))))
-      (let arloop ((i 0))
-	(if (< i arcount)
-            (receive (name namelen)
-		(get-name buf ptr)
-              (vector-set! (vector-ref dnsp 5) i ptr)
-              (set! ptr (+ ptr namelen 10
-                           (get-u16be buf (+ ptr namelen 8))))  ; RDLENGTH
-              (arloop (+ i 1)))))
+      (dotimes (i qdcount)
+        (receive (qname qtype qclass len)
+	    (parse-question-section buf ptr)
+	  ;; (name type class)
+          (vector-set! questions i (list qname qtype qclass))
+          (inc! ptr len)))
+      (dotimes (i ancount)
+	(receive (name namelen)
+	    (get-name buf ptr)
+          (vector-set! answers i (list name ptr))
+          (inc! ptr (+ namelen 10
+                       (get-u16be buf (+ ptr namelen 8))))))  ; RDLENGTH
+      (dotimes (i nscount)
+        (receive (name namelen)
+	    (get-name buf ptr)
+          (vector-set! authorities i (list name ptr))
+          (inc! ptr (+ namelen 10
+                       (get-u16be buf (+ ptr namelen 8))))))  ; RDLENGTH
+      (dotimes (i arcount)
+        (receive (name namelen)
+	    (get-name buf ptr)
+          (vector-set! additionals i (list name ptr))
+          (inc! ptr (+ namelen 10
+                       (get-u16be buf (+ ptr namelen 8))))))  ; RDLENGTH
       dnsp)))
 
 
