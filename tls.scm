@@ -260,7 +260,7 @@
     (append (u16->list (length pair-list))
 	    pair-list)))
 
-(define (tls-client-hello tls :key ciphersuite)
+(define (tls-client-hello tls :key (ciphersuite #f))
   (tls-make-client-random tls)
   (list->u8vector
    (make-tls-handshake tls 1
