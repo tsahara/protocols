@@ -3,6 +3,9 @@
 (test-start "quic test")
 (load "./quic.scm")
 
+(define (h2b . str-list)
+  (hexadecimal->bytevector (apply string-append str-list)))
+
 (test-section "HKDF")
 
 ;; Test Case 1
@@ -87,5 +90,42 @@
                       (hexadecimal->bytevector PRK)
                       (hexadecimal->bytevector info)
                       L)))
+
+
+(test-section "HKDF-Expand-Label")
+
+(let ((initial_salt (h2b "c3eef712c72ebb5a11a7d2432bb46365bef9f502"))
+      (initial_secret (h2b "524e374c6da8cf8b496f4bcb69678350"
+                           "7aafee6198b202b4bc823ebf7514a423"))
+      (client_initial_secret (h2b "fda3953aecc040e48b34e27ef87de3a6"
+                                  "098ecf0e38b7e032c5c57bcbd5975b84")))
+  (test* "A.1. Keys: initial_secret"
+         initial_secret
+         (hkdf-extract :sha256 initial_salt (h2b "8394c8f03e515708")))
+
+  (test* "A.1. Keys: client_initial_secret"
+         client_initial_secret
+         (tls-hkdf-expand-label initial_secret
+                                "client in"
+                                (u8vector)
+                                32))
+  (test* "A.1. Keys: key"
+         (h2b "af7fd7efebd21878ff66811248983694")
+         (tls-hkdf-expand-label client_initial_secret
+                                "quic key"
+                                (u8vector)
+                                16))
+  (test* "A.1. Keys: iv"
+         (h2b "8681359410a70bb9c92f0420")
+         (tls-hkdf-expand-label client_initial_secret
+                                "quic iv"
+                                (u8vector)
+                                12))
+  (test* "A.1. Keys: hp"
+         (h2b "a980b8b4fb7d9fbc13e814c23164253d")
+         (tls-hkdf-expand-label client_initial_secret
+                                "quic hp"
+                                (u8vector)
+                                16)))
 
 (test-end :exit-on-failure #t)
