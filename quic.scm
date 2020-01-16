@@ -18,7 +18,8 @@
   (case sym
     ((:sha256) <sha256>)))
 
-(define (hkdf-expand-label hash salt ikm)
+;; https://tools.ietf.org/html/rfc5869#section-2.2
+(define (hkdf-extract hash salt ikm)
   (let1 hmac (make <hmac>
                :key (u8vector->string salt)
                :hasher (hash-symbol->class hash))
