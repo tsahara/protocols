@@ -184,32 +184,27 @@
           (state-set! 3 col (logxor a3 (xtime (logxor a3 a0)) t)))))
 
     ;; XXX CBC
-    (cbc state iv)
-    (print-state "initial")
+    (if iv
+        (cbc state iv))
 
     (key-expansion! key expanded-key)
     (add-round-key! state expanded-key 0)
-    (print-state "round key added")
 
     ;; Rounds
     (do ((i 1 (+ i 1)))
         ((= i num-of-rounds))
-      (format #t "# Round ~a~%" i)
       (sub-bytes! state)
       (shift-rows!)
-      (print-state "shift")
       (mix-columns!)
-      (print-state "mix")
       (add-round-key! state expanded-key i))
 
     ;; Final Round
     (sub-bytes! state)
     (shift-rows!)
-    (print-state "shift")
     (add-round-key! state expanded-key num-of-rounds)
     state))
 
-(let1 r (aes-encrypt (string->u8vector "01234567890123456789012345678901")
+#;(let1 r (aes-encrypt (string->u8vector "01234567890123456789012345678901")
                      (string->u8vector "00000000000000000000000000000000")
                      (string->u8vector "abcdefghijklmnop"))
   (print (bytevector->hexadecimal r)))
